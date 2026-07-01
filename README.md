@@ -20,10 +20,30 @@ pip install swarmstate            # prebuilt abi3 wheels, no compiler required
 
 Optional extras: `swarmstate[langgraph]`, `swarmstate[crewai]`, `swarmstate[redis]`, `swarmstate[all]`.
 
+## Usage
+
+```python
+import swarmstate as ss
+
+store = ss.Store()                              # in-memory, msgpack codec
+store.set("workflow", "onboarding", {"step": 3, "data": {...}})
+snap = store.snapshot()                          # cheap, immutable snapshot
+store.set("workflow", "onboarding", {"step": 4})
+store.restore(snap)                              # rollback
+store.get("workflow", "onboarding")              # -> {"step": 3, "data": {...}}
+
+snap2 = store.snapshot()
+snap2.diff(snap)                                 # {"added": [...], "removed": [...], "changed": [...]}
+```
+
 ## Status
 
-Early development. Milestone **M0 (scaffolding)** is complete: the Rust core builds and
-`import swarmstate` works. Store (M1), HandoffGraph (M2), and the LangGraph adapter (M3) are next.
+Early development.
+
+- **M0 (scaffolding)** ✅ — Rust core builds; `import swarmstate` works.
+- **M1 (Rust store)** ✅ — concurrent KV store, msgpack codec, O(1) immutable snapshots,
+  incremental diffs, GIL released on hot paths.
+- **M2 (HandoffGraph)**, **M3 (LangGraph adapter)** — next.
 
 ## Development
 
