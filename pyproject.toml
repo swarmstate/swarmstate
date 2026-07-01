@@ -32,7 +32,7 @@ all = ["swarmstate[langgraph,crewai,redis]"]
 [project.urls]
 Homepage = "https://github.com/swarmstate/swarmstate"
 Repository = "https://github.com/swarmstate/swarmstate"
-Documentation = "https://swarmstate.github.io/swarmstate"
+Documentation = "https://swarmstate.github.io"
 
 [tool.maturin]
 python-source = "python"
