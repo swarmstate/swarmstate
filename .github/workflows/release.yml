@@ -25,7 +25,9 @@ jobs:
         platform:
           - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
           - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
-          - { runner: macos-13, target: x86_64, manylinux: "" }
+          # Both macOS wheels build on the arm64 runner; x86_64 is
+          # cross-compiled to avoid the scarce Intel (macos-13) runners.
+          - { runner: macos-14, target: x86_64, manylinux: "" }
           - { runner: macos-14, target: aarch64, manylinux: "" }
           - { runner: windows-latest, target: x64, manylinux: "" }
     steps:
