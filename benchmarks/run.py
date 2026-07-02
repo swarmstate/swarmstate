@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""swarmstate benchmarks — reproducible.
+"""swarmstate benchmarks - reproducible.
 
 Measures two things that matter for production checkpointing:
 
 1. **Checkpoint latency & throughput** of the LangGraph checkpointer interface:
    ``SwarmStateSaver`` vs ``InMemorySaver`` (both in-memory) vs ``SqliteSaver``
    (file-backed, the common way to get persistence today).
-2. **Snapshot cost vs state size** — ``Store.snapshot()`` (O(1), structural
+2. **Snapshot cost vs state size** - ``Store.snapshot()`` (O(1), structural
    sharing) vs ``copy.deepcopy`` of an equivalent dict (the O(n) way to get an
    independent, mutable copy).
 
@@ -130,7 +130,7 @@ def bench_snapshot(sizes: list[int], iters: int, warmup: int) -> dict:
 
 
 # Validated dark-mode categorical palette (dataviz skill: all checks pass on
-# surface #0d1117 — blue / aqua / orange).
+# surface #0d1117 - blue / aqua / orange).
 _COLORS = {"SwarmStateSaver": "#3987e5", "InMemorySaver": "#199e70", "SqliteSaver": "#d95926"}
 _INK, _MUTED, _GRID = "#e6edf3", "#8b97a5", "#2c2c2a"
 
@@ -179,7 +179,7 @@ def make_charts(results: dict, outdir) -> None:
             )
     ax.set_xticks(list(xb))
     ax.set_xticklabels([lbl for _, lbl in metrics], color=_INK, fontsize=10)
-    ax.set_ylabel("latency p50 (µs) — lower is better", color=_MUTED, fontsize=9)
+    ax.set_ylabel("latency p50 (µs), lower is better", color=_MUTED, fontsize=9)
     ax.set_title("Checkpointer latency (LangGraph interface)", color=_INK, fontsize=12, pad=12)
     ax.legend(
         frameon=False,
@@ -217,7 +217,7 @@ def make_charts(results: dict, outdir) -> None:
         label="dict deepcopy  (O(n))",
     )
     ax.set_xlabel("entries in state", color=_MUTED, fontsize=9)
-    ax.set_ylabel("snapshot time (ms) — lower is better", color=_MUTED, fontsize=9)
+    ax.set_ylabel("snapshot time (ms), lower is better", color=_MUTED, fontsize=9)
     ax.set_title("Snapshot cost vs state size", color=_INK, fontsize=12, pad=12)
     ax.legend(frameon=False, fontsize=9, labelcolor=_INK, loc="upper left")
     _style_axes(ax)

@@ -15,7 +15,7 @@ Outputs `results.json` and two SVG charts under `benchmarks/charts/`.
    `get_tuple` p50/p99 and throughput for `SwarmStateSaver`, `InMemorySaver`, and
    `SqliteSaver`.
 2. **Snapshot cost vs state size**: `Store.snapshot()` vs `copy.deepcopy` of an
-   equivalent dict — the two ways to get an independent, mutable copy of state.
+   equivalent dict - the two ways to get an independent, mutable copy of state.
 
 ## Notes on methodology
 
@@ -26,5 +26,5 @@ Outputs `results.json` and two SVG charts under `benchmarks/charts/`.
   comparison reflects the cost of SQLite-backed persistence as commonly configured. A
   persistent swarmstate backend (redis/disk) is on the roadmap (M5).
 - **Warm cache**, single process. Hardware, versions, seed and payload are recorded in
-  `results.json` — always read them alongside any number.
+  `results.json` - always read them alongside any number.
 - No number here is hand-picked; regenerate with the command above.

@@ -62,7 +62,7 @@ jobs:
           python -m pip install --upgrade pip pytest
           python -m pip install ".[langgraph,redis]" fakeredis
       - name: pytest (adapters & backends)
-        run: pytest -q tests/test_langgraph.py tests/test_redis.py tests/test_crewai.py
+        run: pytest -q tests/test_langgraph.py tests/test_redis.py tests/test_crewai.py tests/test_disk.py
 
   lint:
     name: Lint (ruff + cargo fmt)
