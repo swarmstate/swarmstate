@@ -42,6 +42,14 @@ g.add_edge("triage", "human")                    # unconditional default
 g.route("triage", {"category": "billing"})       # -> "billing"
 ```
 
+Drop-in LangGraph checkpointer (`pip install "swarmstate[langgraph]"`):
+
+```python
+from swarmstate.integrations.langgraph import SwarmStateSaver
+
+graph = builder.compile(checkpointer=SwarmStateSaver())   # replaces SqliteSaver, 1 line
+```
+
 ## Status
 
 Early development.
@@ -51,7 +59,9 @@ Early development.
   incremental diffs, GIL released on hot paths.
 - **M2 (HandoffGraph)** ✅ — deterministic conditional routing with a safe Rust condition
   evaluator (no `eval`), cycle detection.
-- **M3 (LangGraph adapter)** — next.
+- **M3 (LangGraph adapter)** ✅ — `SwarmStateSaver`, a drop-in `BaseCheckpointSaver`
+  backed by the `Store`; snapshot/roll back the whole checkpoint DB at once.
+- **M4 (Benchmarks)** — next.
 
 ## Development
 
