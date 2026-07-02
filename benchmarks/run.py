@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""swarmstate benchmarks — honest, reproducible.
+"""swarmstate benchmarks — reproducible.
 
 Measures two things that matter for production checkpointing:
 

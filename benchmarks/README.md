@@ -1,6 +1,6 @@
 # Benchmarks
 
-Reproducible, honest benchmarks for swarmstate.
+Reproducible benchmarks for swarmstate.
 
 ```bash
 pip install -e ".[langgraph]" langgraph-checkpoint-sqlite matplotlib
@@ -17,7 +17,7 @@ Outputs `results.json` and two SVG charts under `benchmarks/charts/`.
 2. **Snapshot cost vs state size**: `Store.snapshot()` vs `copy.deepcopy` of an
    equivalent dict — the two ways to get an independent, mutable copy of state.
 
-## Honesty notes
+## Notes on methodology
 
 - **Build matters.** Numbers are from a **release** build (`maturin develop --release`
   or the published wheels). Debug builds are several times slower.

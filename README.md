@@ -2,9 +2,14 @@
 
 > Drop-in state backend for LangGraph, CrewAI & custom agent loops — Rust core, framework-agnostic, built for production.
 
+> **~12.8× faster checkpoint writes than `SqliteSaver`** on LangGraph's interface, and **O(1)**
+> state snapshots (hundreds of thousands× faster than a `deepcopy` on large state).
+> Reproducible numbers → **[swarmstate.github.io/benchmarks](https://swarmstate.github.io/benchmarks/)**.
+
 `swarmstate` is a **state and checkpointing backend** with a Rust core and a Python API for multi-agent
-systems. It is not an orchestration framework: it is the fast engine that sits *underneath* LangGraph,
-CrewAI, and custom agent loops — the same way a fast columnar engine sits underneath data workloads.
+systems. It does not compete with visible agent frameworks; it acts as low-level infrastructure — much
+like engines such as DuckDB, ClickHouse, Arrow, or Polars sit underneath data applications without
+replacing them.
 
 It solves three production pains:
 
@@ -16,6 +21,7 @@ It solves three production pains:
 
 ```bash
 pip install swarmstate            # prebuilt abi3 wheels, no compiler required
+uv add swarmstate                 # or with uv
 ```
 
 Optional extras: `swarmstate[langgraph]`, `swarmstate[crewai]`, `swarmstate[redis]`, `swarmstate[all]`.
