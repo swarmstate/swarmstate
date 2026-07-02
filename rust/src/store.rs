@@ -11,7 +11,7 @@
 //! runs under the GIL.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,6 +137,9 @@ pub struct Store {
     history: RwLock<Vec<std::sync::Arc<SnapshotData>>>,
     counter: AtomicU64,
     last_id: RwLock<Option<u64>>,
+    // Running total of stored value bytes, kept incrementally so snapshot()
+    // stays O(1) instead of summing over every value.
+    total_bytes: AtomicUsize,
 }
 
 #[pymethods]
@@ -161,6 +164,7 @@ impl Store {
             history: RwLock::new(Vec::new()),
             counter: AtomicU64::new(1),
             last_id: RwLock::new(None),
+            total_bytes: AtomicUsize::new(0),
         })
     }
 
@@ -186,13 +190,23 @@ impl Store {
     ) -> PyResult<()> {
         let bytes = codec::encode(value)?; // touches Python -> under GIL
         py.allow_threads(|| {
+            let new_len = bytes.len();
             let mut guard = self.inner.write().unwrap();
-            if let Some(ns) = guard.get_mut(&namespace) {
-                ns.insert(key, bytes);
+            let old_len = if let Some(ns) = guard.get_mut(&namespace) {
+                ns.insert(key, bytes).map(|old| old.len()).unwrap_or(0)
             } else {
                 let mut ns = ImMap::new();
                 ns.insert(key, bytes);
                 guard.insert(namespace, ns);
+                0
+            };
+            // Keep the running byte total in sync (delta = new - old).
+            if new_len >= old_len {
+                self.total_bytes
+                    .fetch_add(new_len - old_len, Ordering::SeqCst);
+            } else {
+                self.total_bytes
+                    .fetch_sub(old_len - new_len, Ordering::SeqCst);
             }
         });
         Ok(())
@@ -230,7 +244,13 @@ impl Store {
         py.allow_threads(|| {
             let mut guard = self.inner.write().unwrap();
             match guard.get_mut(namespace) {
-                Some(ns) => ns.remove(key).is_some(),
+                Some(ns) => match ns.remove(key) {
+                    Some(old) => {
+                        self.total_bytes.fetch_sub(old.len(), Ordering::SeqCst);
+                        true
+                    }
+                    None => false,
+                },
                 None => false,
             }
         })
@@ -268,6 +288,7 @@ impl Store {
         py.allow_threads(|| {
             let mut guard = self.inner.write().unwrap();
             guard.clear();
+            self.total_bytes.store(0, Ordering::SeqCst);
         });
     }
 
@@ -282,10 +303,7 @@ impl Store {
                 *last = Some(id);
                 prev
             };
-            let size_bytes = map
-                .values()
-                .map(|ns| ns.values().map(Vec::len).sum::<usize>())
-                .sum();
+            let size_bytes = self.total_bytes.load(Ordering::SeqCst);
             let data = std::sync::Arc::new(SnapshotData {
                 id,
                 timestamp: now_secs(),
@@ -310,6 +328,8 @@ impl Store {
         py.allow_threads(|| {
             let mut guard = self.inner.write().unwrap();
             *guard = snapshot.data.map.clone();
+            self.total_bytes
+                .store(snapshot.data.size_bytes, Ordering::SeqCst);
         });
     }
 

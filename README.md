@@ -61,7 +61,11 @@ Early development.
   evaluator (no `eval`), cycle detection.
 - **M3 (LangGraph adapter)** ✅ — `SwarmStateSaver`, a drop-in `BaseCheckpointSaver`
   backed by the `Store`; snapshot/roll back the whole checkpoint DB at once.
-- **M4 (Benchmarks)** — next.
+- **M4 (Benchmarks)** ✅ — `SwarmStateSaver.put` **~12.8× faster than `SqliteSaver`**;
+  `Store.snapshot()` is **O(1)** (hundreds of thousands× faster than deep-copying large
+  state). Reproducible: [`benchmarks/run.py`](benchmarks/run.py); charts & tables in the
+  [docs](https://swarmstate.github.io/benchmarks/).
+- **M5 (CrewAI adapter + Redis backend)** — next.
 
 ## Development
 

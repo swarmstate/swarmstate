@@ -68,6 +68,9 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
     ) -> None:
         super().__init__(serde=serde)
         self.store: Store = store if store is not None else Store()
+        # O(1) "latest checkpoint id" cache per (thread_id, checkpoint_ns).
+        # A best-effort fast path for get_tuple; always falls back to a scan.
+        self._latest: dict[tuple[str, str], str] = {}
 
     # ------------------------------------------------------------------ sync
 
@@ -93,6 +96,10 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
                 "parent": config["configurable"].get("checkpoint_id"),
             },
         )
+        key = (thread_id, checkpoint_ns)
+        cur = self._latest.get(key)
+        if cur is None or checkpoint_id > cur:
+            self._latest[key] = checkpoint_id
         return {
             "configurable": {
                 "thread_id": thread_id,
@@ -130,10 +137,16 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
 
         checkpoint_id = get_checkpoint_id(config)
         if not checkpoint_id:
-            keys = self.store.keys(ns)
-            if not keys:
-                return None
-            checkpoint_id = max(keys)
+            # Fast path: cached latest id; fall back to a scan (cold saver, or
+            # after a store.restore invalidated the cache).
+            cache_key = (thread_id, checkpoint_ns)
+            checkpoint_id = self._latest.get(cache_key)
+            if not checkpoint_id or not self.store.contains(ns, checkpoint_id):
+                keys = self.store.keys(ns)
+                if not keys:
+                    return None
+                checkpoint_id = max(keys)
+                self._latest[cache_key] = checkpoint_id
 
         saved = self.store.get(ns, checkpoint_id)
         if saved is None:
@@ -194,6 +207,8 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
             if len(parts) >= 2 and parts[0] in ("ck", "wr") and parts[1] == thread_id:
                 for key in self.store.keys(ns):
                     self.store.delete(ns, key)
+        for k in [k for k in self._latest if k[0] == thread_id]:
+            del self._latest[k]
 
     # ------------------------------------------------------------------ async
     # Async variants delegate to the sync ones (all work is in the Rust core,
