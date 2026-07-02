@@ -88,9 +88,7 @@ class DiskStore:
 
     def delete(self, namespace: str, key: str) -> bool:
         with self._lock:
-            cur = self._conn.execute(
-                "DELETE FROM kv WHERE ns = ? AND k = ?", (namespace, key)
-            )
+            cur = self._conn.execute("DELETE FROM kv WHERE ns = ? AND k = ?", (namespace, key))
         return cur.rowcount > 0
 
     def keys(self, namespace: str) -> list[str]:
@@ -127,9 +125,7 @@ class DiskStore:
     def restore(self, snapshot: DiskSnapshot) -> None:
         with self._lock:
             self._conn.execute("DELETE FROM kv")
-            self._conn.executemany(
-                "INSERT INTO kv (ns, k, v) VALUES (?, ?, ?)", snapshot._rows
-            )
+            self._conn.executemany("INSERT INTO kv (ns, k, v) VALUES (?, ?, ?)", snapshot._rows)
 
     def close(self) -> None:
         with self._lock:
