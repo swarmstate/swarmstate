@@ -34,6 +34,12 @@ store.get("workflow", "onboarding")              # -> {"step": 3, "data": {...}}
 
 snap2 = store.snapshot()
 snap2.diff(snap)                                 # {"added": [...], "removed": [...], "changed": [...]}
+
+# Deterministic, LLM-free routing (resolved natively in Rust)
+g = ss.HandoffGraph()
+g.add_edge("triage", "billing", when="category == 'billing'")
+g.add_edge("triage", "human")                    # unconditional default
+g.route("triage", {"category": "billing"})       # -> "billing"
 ```
 
 ## Status
@@ -43,7 +49,9 @@ Early development.
 - **M0 (scaffolding)** ✅ — Rust core builds; `import swarmstate` works.
 - **M1 (Rust store)** ✅ — concurrent KV store, msgpack codec, O(1) immutable snapshots,
   incremental diffs, GIL released on hot paths.
-- **M2 (HandoffGraph)**, **M3 (LangGraph adapter)** — next.
+- **M2 (HandoffGraph)** ✅ — deterministic conditional routing with a safe Rust condition
+  evaluator (no `eval`), cycle detection.
+- **M3 (LangGraph adapter)** — next.
 
 ## Development
 

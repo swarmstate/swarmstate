@@ -12,9 +12,9 @@ Public API (built out across milestones):
 from __future__ import annotations
 
 from . import _core
-from ._core import Snapshot, Store
+from ._core import HandoffGraph, Snapshot, Store
 
-__all__ = ["Snapshot", "Store", "__version__", "core_version"]
+__all__ = ["HandoffGraph", "Snapshot", "Store", "__version__", "core_version"]
 
 #: Version of the installed ``swarmstate`` package.
 __version__ = _core.__version__

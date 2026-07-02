@@ -10,6 +10,8 @@
 use pyo3::prelude::*;
 
 mod codec;
+mod condition;
+mod graph;
 mod store;
 
 /// Version of the compiled Rust core. Mirrors the crate version in Cargo.toml.
@@ -30,6 +32,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_class::<store::Store>()?;
     m.add_class::<store::Snapshot>()?;
+    m.add_class::<graph::HandoffGraph>()?;
     Ok(())
 }
 

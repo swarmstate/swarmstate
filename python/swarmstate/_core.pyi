@@ -84,3 +84,54 @@ class Store:
         ...
 
     def __len__(self) -> int: ...
+
+class HandoffGraph:
+    """A deterministic, LLM-free routing graph over named nodes.
+
+    Edges carry an optional ``when`` condition written in a small, safe
+    mini-language (never Python ``eval``): literals, dotted state paths,
+    ``== != < <= > >=``, ``in``, ``and``/``or``/``not`` and parentheses.
+    """
+
+    def __init__(self, on_cycle: str = "error") -> None:
+        """``on_cycle``: ``"error"`` (default) or ``"allow"`` on cycle detection."""
+        ...
+
+    @property
+    def on_cycle(self) -> str: ...
+    def add_node(self, name: str) -> None:
+        """Register a node with no edges."""
+        ...
+
+    def add_edge(self, from_node: str, to: str, when: Optional[str] = None) -> None:
+        """Add a directed edge ``from_node -> to``, optionally guarded by ``when``.
+
+        Raises ``ValueError`` on an invalid condition, or (when
+        ``on_cycle="error"``) if the edge would create a cycle.
+        """
+        ...
+
+    def route(self, node: str, state: Optional[dict] = None) -> Optional[str]:
+        """Return the next node from ``node`` given ``state``.
+
+        Evaluates outgoing edges in insertion order and returns the first whose
+        condition holds (an edge with no condition always matches); ``None`` if
+        none match.
+        """
+        ...
+
+    def nodes(self) -> list[str]:
+        """All nodes, sorted."""
+        ...
+
+    def edges(self, node: str) -> list[tuple[str, Optional[str]]]:
+        """Outgoing edges of ``node`` as ``(to, when)`` pairs, in insertion order."""
+        ...
+
+    def has_node(self, node: str) -> bool: ...
+    def is_dag(self) -> bool:
+        """Whether the graph is currently acyclic."""
+        ...
+
+    def __len__(self) -> int: ...
+    def __contains__(self, node: str) -> bool: ...
