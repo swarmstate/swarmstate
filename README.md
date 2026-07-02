@@ -65,7 +65,10 @@ Early development.
   `Store.snapshot()` is **O(1)** (hundreds of thousands× faster than deep-copying large
   state). Reproducible: [`benchmarks/run.py`](benchmarks/run.py); charts & tables in the
   [docs](https://swarmstate.github.io/benchmarks/).
-- **M5 (CrewAI adapter + Redis backend)** — next.
+- **M5 (CrewAI adapter + Redis backend)** ✅ — `RedisStore` (persistent, msgpack
+  wire-format, drop-in checkpointer backend) and `SwarmStateStorage` (CrewAI-compatible
+  memory backed by a shared `Store`).
+- **M6 (docs · wheels · PyPI)** — mostly done.
 
 ## Development
 
