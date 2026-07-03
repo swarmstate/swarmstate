@@ -22,6 +22,7 @@ Requires the ``langgraph`` extra: ``pip install "swarmstate[langgraph]"``.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any, Optional
 
@@ -39,6 +40,7 @@ from langgraph.checkpoint.base import (
 )
 
 from .. import Store
+from ..observability import MetricsSink
 
 # Unit-separator delimiter: never appears in thread ids / namespaces.
 _SEP = "\x1f"
@@ -56,7 +58,7 @@ def _blobs_ns(thread_id: str, checkpoint_ns: str) -> str:
     return f"bl{_SEP}{thread_id}{_SEP}{checkpoint_ns}"
 
 
-class SwarmStateSaver(BaseCheckpointSaver[str]):
+class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base is Any (no stubs)
     """A LangGraph checkpointer backed by a swarmstate :class:`~swarmstate.Store`.
 
     Args:
@@ -68,6 +70,9 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
             serialization for long threads with large, mostly-stable channels,
             at the cost of extra reads on ``get_tuple`` (one per channel). The
             default (False) keeps ``get_tuple`` at a single read.
+        metrics: optional :class:`~swarmstate.observability.MetricsSink` that
+            receives the latency and outcome of each ``put`` / ``put_writes`` /
+            ``get_tuple``. Defaults to ``None`` (no measurement, zero overhead).
     """
 
     def __init__(
@@ -76,10 +81,12 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         *,
         serde: Optional[SerializerProtocol] = None,
         incremental: bool = False,
+        metrics: Optional[MetricsSink] = None,
     ) -> None:
         super().__init__(serde=serde)
         self.store: Store = store if store is not None else Store()
         self.incremental = incremental
+        self._metrics = metrics
         # O(1) "latest checkpoint id" cache per (thread_id, checkpoint_ns).
         # A best-effort fast path for get_tuple; always falls back to a scan.
         self._latest: dict[tuple[str, str], str] = {}
@@ -87,6 +94,30 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
     # ------------------------------------------------------------------ sync
 
     def put(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        if self._metrics is None:
+            return self._put_impl(config, checkpoint, metadata, new_versions)
+        t0 = time.perf_counter()
+        ok = True
+        try:
+            return self._put_impl(config, checkpoint, metadata, new_versions)
+        except BaseException:
+            ok = False
+            raise
+        finally:
+            self._metrics.record(
+                "put",
+                time.perf_counter() - t0,
+                thread_id=config["configurable"]["thread_id"],
+                ok=ok,
+            )
+
+    def _put_impl(
         self,
         config: RunnableConfig,
         checkpoint: Checkpoint,
@@ -144,6 +175,30 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         task_id: str,
         task_path: str = "",
     ) -> None:
+        if self._metrics is None:
+            return self._put_writes_impl(config, writes, task_id, task_path)
+        t0 = time.perf_counter()
+        ok = True
+        try:
+            return self._put_writes_impl(config, writes, task_id, task_path)
+        except BaseException:
+            ok = False
+            raise
+        finally:
+            self._metrics.record(
+                "put_writes",
+                time.perf_counter() - t0,
+                thread_id=config["configurable"]["thread_id"],
+                ok=ok,
+            )
+
+    def _put_writes_impl(
+        self,
+        config: RunnableConfig,
+        writes: Sequence[tuple[str, Any]],
+        task_id: str,
+        task_path: str = "",
+    ) -> None:
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = config["configurable"]["checkpoint_id"]
@@ -160,6 +215,24 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
             self.store.set(ns, key, [task_id, channel, [v_type, v_bytes], task_path])
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
+        if self._metrics is None:
+            return self._get_tuple_impl(config)
+        t0 = time.perf_counter()
+        ok = True
+        try:
+            return self._get_tuple_impl(config)
+        except BaseException:
+            ok = False
+            raise
+        finally:
+            self._metrics.record(
+                "get_tuple",
+                time.perf_counter() - t0,
+                thread_id=config["configurable"]["thread_id"],
+                ok=ok,
+            )
+
+    def _get_tuple_impl(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         ns = _ckpt_ns(thread_id, checkpoint_ns)
@@ -285,7 +358,7 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
     # ---------------------------------------------------------------- helpers
 
     def _build_tuple(
-        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, saved: dict
+        self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, saved: dict[str, Any]
     ) -> CheckpointTuple:
         checkpoint = self.serde.loads_typed(tuple(saved["cp"]))
         metadata = self.serde.loads_typed(tuple(saved["md"]))

@@ -21,7 +21,8 @@ structural-sharing snapshots.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, cast
 
 import msgpack
 
@@ -29,7 +30,7 @@ _DEFAULT_URL = "redis://localhost:6379/0"
 
 
 def _pack(value: Any) -> bytes:
-    return msgpack.packb(value, use_bin_type=True)
+    return cast(bytes, msgpack.packb(value, use_bin_type=True))
 
 
 def _unpack(raw: bytes) -> Any:
@@ -73,7 +74,7 @@ class RedisStore:
     def _hkey(self, namespace: str) -> str:
         return f"{self._prefix}:{namespace}"
 
-    def _iter_hkeys(self):
+    def _iter_hkeys(self) -> Iterator[str]:
         for raw in self._r.scan_iter(match=f"{self._prefix}:*"):
             yield raw.decode() if isinstance(raw, bytes) else raw
 
@@ -92,7 +93,7 @@ class RedisStore:
         return bool(self._r.hexists(self._hkey(namespace), key))
 
     def delete(self, namespace: str, key: str) -> bool:
-        return self._r.hdel(self._hkey(namespace), key) > 0
+        return bool(self._r.hdel(self._hkey(namespace), key) > 0)
 
     def keys(self, namespace: str) -> list[str]:
         return [
@@ -111,7 +112,7 @@ class RedisStore:
         return sum(self._r.hlen(hk) for hk in self._iter_hkeys())
 
     def __contains__(self, namespace: str) -> bool:
-        return self._r.exists(self._hkey(namespace)) > 0
+        return bool(self._r.exists(self._hkey(namespace)) > 0)
 
     # ------------------------------------------------------------- snapshot
     def snapshot(self) -> RedisSnapshot:

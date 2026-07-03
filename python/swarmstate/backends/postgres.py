@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 import threading
-from typing import Any
+from typing import Any, cast
 
 import msgpack
 
@@ -32,10 +32,10 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _pack(value: Any) -> bytes:
-    return msgpack.packb(value, use_bin_type=True)
+    return cast(bytes, msgpack.packb(value, use_bin_type=True))
 
 
-def _unpack(raw) -> Any:
+def _unpack(raw: Any) -> Any:
     return msgpack.unpackb(bytes(raw), raw=False, strict_map_key=False)
 
 
@@ -108,7 +108,7 @@ class PostgresStore:
             cur = self._conn.execute(
                 f"DELETE FROM {self.table} WHERE ns = %s AND k = %s", (namespace, key)
             )
-            return cur.rowcount > 0
+            return bool(cur.rowcount > 0)
 
     def keys(self, namespace: str) -> list[str]:
         with self._lock:
@@ -128,7 +128,7 @@ class PostgresStore:
 
     def __len__(self) -> int:
         with self._lock:
-            return self._conn.execute(f"SELECT count(*) FROM {self.table}").fetchone()[0]
+            return int(self._conn.execute(f"SELECT count(*) FROM {self.table}").fetchone()[0])
 
     def __contains__(self, namespace: str) -> bool:
         with self._lock:

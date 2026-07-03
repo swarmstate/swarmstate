@@ -24,7 +24,8 @@ pip install swarmstate            # prebuilt abi3 wheels, no compiler required
 uv add swarmstate                 # or with uv
 ```
 
-Optional extras: `swarmstate[langgraph]`, `swarmstate[crewai]`, `swarmstate[redis]`, `swarmstate[all]`.
+Optional extras: `swarmstate[langgraph]`, `swarmstate[crewai]`, `swarmstate[redis]`,
+`swarmstate[disk]`, `swarmstate[postgres]`, `swarmstate[otel]`, `swarmstate[all]`.
 
 ## Usage
 
@@ -56,6 +57,17 @@ from swarmstate.integrations.langgraph import SwarmStateSaver
 graph = builder.compile(checkpointer=SwarmStateSaver())   # replaces SqliteSaver, 1 line
 ```
 
+Optional metrics on checkpoint operations (opt-in, zero overhead when unused):
+
+```python
+from swarmstate.observability import InMemoryMetrics       # or OpenTelemetryMetrics
+
+metrics = InMemoryMetrics()
+saver = SwarmStateSaver(metrics=metrics)
+# ... run the graph ...
+metrics.summary()   # {"put": {"count": 12, "p50_ms": 0.006, ...}, "get_tuple": {...}}
+```
+
 ## Status
 
 Early development.
@@ -76,6 +88,18 @@ Early development.
   `SwarmStateStorage` (portable memory backed by a shared `Store`).
 - **M6 (docs · wheels · PyPI)** ✅ - full docs site, benchmarks, cross-platform abi3
   wheels, and PyPI publishing via Trusted Publishing (OIDC).
+- **Observability** ✅ - opt-in metrics hooks on checkpoint ops (`put` / `put_writes` /
+  `get_tuple`), with an in-memory sink and an OpenTelemetry sink (`swarmstate[otel]`).
+  Zero overhead when unused. Strict `mypy` in CI.
+
+## Examples
+
+Runnable, offline, deterministic demos in [`examples/`](examples/):
+
+- [`support_triage.py`](examples/support_triage.py) - a LangGraph workflow tying together
+  `HandoffGraph` routing, `SwarmStateSaver` checkpointing and snapshot/restore time-travel.
+- [`state_portability.py`](examples/state_portability.py) - state as standard msgpack
+  bytes, read back and cross-checked against the `msgpack` package.
 
 ## Development
 

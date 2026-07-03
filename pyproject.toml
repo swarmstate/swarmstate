@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "swarmstate"
-version = "0.8.0"
-description = "Drop-in state backend for LangGraph, CrewAI & custom agent loops — Rust core, framework-agnostic, built for production."
+version = "0.9.0"
+description = "Drop-in state backend for LangGraph, CrewAI & custom agent loops - Rust core, framework-agnostic, built for production."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.9"
@@ -27,10 +27,11 @@ crewai = ["crewai>=0.70"]
 redis = ["redis>=5.0", "msgpack>=1.0"]
 disk = ["msgpack>=1.0"]
 postgres = ["psycopg[binary]>=3.1", "msgpack>=1.0"]
-docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+otel = ["opentelemetry-api>=1.20"]
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26", "mike>=2.0"]
+dev = ["pytest>=8.0", "ruff>=0.6", "mypy>=1.11"]
 bench = ["swarmstate[langgraph]", "langgraph-checkpoint-sqlite>=2.0", "matplotlib>=3.8"]
-all = ["swarmstate[langgraph,crewai,redis,disk,postgres]"]
+all = ["swarmstate[langgraph,crewai,redis,disk,postgres,otel]"]
 
 [project.urls]
 Homepage = "https://github.com/swarmstate/swarmstate"
@@ -49,3 +50,24 @@ target-version = "py39"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.mypy]
+python_version = "3.10"
+files = ["python/swarmstate"]
+strict = true
+# Type-check our own package only; don't descend into third-party trees (their
+# stubs target newer Python and pull in numpy/etc.). The compiled Rust module
+# and the optional adapters' deps have no stubs we control.
+[[tool.mypy.overrides]]
+module = [
+    "swarmstate._core",
+    "langgraph.*",
+    "langchain_core.*",
+    "redis.*",
+    "psycopg.*",
+    "msgpack.*",
+    "opentelemetry.*",
+    "crewai.*",
+]
+ignore_missing_imports = true
+follow_imports = "skip"

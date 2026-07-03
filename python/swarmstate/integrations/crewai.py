@@ -59,7 +59,7 @@ class SwarmStateStorage:
         n = len(self.store.keys(self.namespace))
         return f"{n:012d}"
 
-    def save(self, value: Any, metadata: Optional[dict] = None) -> None:
+    def save(self, value: Any, metadata: Optional[dict[str, Any]] = None) -> None:
         """Persist a memory ``value`` with optional ``metadata``."""
         self.store.set(
             self.namespace,
@@ -72,7 +72,7 @@ class SwarmStateStorage:
         query: str,
         limit: int = 3,
         score_threshold: float = 0.0,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Return up to ``limit`` entries scored by token overlap with ``query``.
 
         Each result is ``{"context": str, "metadata": dict, "score": float}``,

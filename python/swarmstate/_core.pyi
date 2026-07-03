@@ -119,7 +119,7 @@ class HandoffGraph:
         """
         ...
 
-    def route(self, node: str, state: Optional[dict] = None) -> Optional[str]:
+    def route(self, node: str, state: Optional[dict[str, Any]] = None) -> Optional[str]:
         """Return the next node from ``node`` given ``state``.
 
         Evaluates outgoing edges in insertion order and returns the first whose

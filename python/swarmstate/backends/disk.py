@@ -23,13 +23,13 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from typing import Any
+from typing import Any, cast
 
 import msgpack
 
 
 def _pack(value: Any) -> bytes:
-    return msgpack.packb(value, use_bin_type=True)
+    return cast(bytes, msgpack.packb(value, use_bin_type=True))
 
 
 def _unpack(raw: bytes) -> Any:
@@ -107,7 +107,7 @@ class DiskStore:
 
     def __len__(self) -> int:
         with self._lock:
-            return self._conn.execute("SELECT COUNT(*) FROM kv").fetchone()[0]
+            return int(self._conn.execute("SELECT COUNT(*) FROM kv").fetchone()[0])
 
     def __contains__(self, namespace: str) -> bool:
         with self._lock:

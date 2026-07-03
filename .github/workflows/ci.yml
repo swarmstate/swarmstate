@@ -62,7 +62,7 @@ jobs:
           python -m pip install --upgrade pip pytest
           python -m pip install ".[langgraph,redis]" fakeredis
       - name: pytest (adapters & backends)
-        run: pytest -q tests/test_langgraph.py tests/test_langgraph_contract.py tests/test_redis.py tests/test_crewai.py tests/test_disk.py
+        run: pytest -q tests/test_langgraph.py tests/test_langgraph_contract.py tests/test_redis.py tests/test_crewai.py tests/test_disk.py tests/test_observability.py tests/test_examples.py
 
   postgres:
     name: Postgres backend
@@ -111,5 +111,9 @@ jobs:
       - name: ruff
         run: |
           python -m pip install --upgrade pip ruff
-          ruff check python tests
-          ruff format --check python tests
+          ruff check python tests examples benchmarks
+          ruff format --check python tests examples
+      - name: mypy (strict, own package)
+        run: |
+          python -m pip install mypy
+          mypy
