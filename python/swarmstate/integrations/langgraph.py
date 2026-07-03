@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Iterator, Sequence
-from typing import Any, Optional
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from typing import Any, Optional, TypeVar
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -44,6 +44,26 @@ from ..observability import MetricsSink
 
 # Unit-separator delimiter: never appears in thread ids / namespaces.
 _SEP = "\x1f"
+
+_T = TypeVar("_T")
+
+
+def _mark_span_error(span: Any, exc: BaseException) -> None:
+    """Record an exception on an OTel span and set its status to ERROR.
+
+    Defensive: instrumentation must never mask the real failure, so any problem
+    here (missing opentelemetry, a misbehaving span) is swallowed.
+    """
+    try:
+        span.record_exception(exc)
+    except Exception:
+        pass
+    try:
+        from opentelemetry.trace import Status, StatusCode
+
+        span.set_status(Status(StatusCode.ERROR, str(exc)))
+    except Exception:
+        pass
 
 
 def _ckpt_ns(thread_id: str, checkpoint_ns: str) -> str:
@@ -73,6 +93,11 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         metrics: optional :class:`~swarmstate.observability.MetricsSink` that
             receives the latency and outcome of each ``put`` / ``put_writes`` /
             ``get_tuple``. Defaults to ``None`` (no measurement, zero overhead).
+        tracer: optional OpenTelemetry ``Tracer``. When set, each ``put`` /
+            ``put_writes`` / ``get_tuple`` runs inside a
+            ``swarmstate.checkpoint.<op>`` span with thread/checkpoint attributes.
+            Get one from :func:`swarmstate.observability.get_tracer`. Defaults to
+            ``None`` (no spans, zero overhead).
     """
 
     def __init__(
@@ -82,14 +107,56 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         serde: Optional[SerializerProtocol] = None,
         incremental: bool = False,
         metrics: Optional[MetricsSink] = None,
+        tracer: Any = None,
     ) -> None:
         super().__init__(serde=serde)
         self.store: Store = store if store is not None else Store()
         self.incremental = incremental
         self._metrics = metrics
+        self._tracer = tracer
         # O(1) "latest checkpoint id" cache per (thread_id, checkpoint_ns).
         # A best-effort fast path for get_tuple; always falls back to a scan.
         self._latest: dict[tuple[str, str], str] = {}
+
+    def _run(self, op: str, thread_id: str, attrs: dict[str, Any], fn: Callable[[], _T]) -> _T:
+        """Run ``fn`` under the configured span (tracer) and timer (metrics).
+
+        Reached only when at least one of tracer/metrics is set; the callers keep
+        a fast-path guard so the uninstrumented default allocates nothing here.
+        """
+        tracer = self._tracer
+        metrics = self._metrics
+        if tracer is None:
+            if metrics is None:
+                return fn()
+            t0 = time.perf_counter()
+            ok = True
+            try:
+                return fn()
+            except BaseException:
+                ok = False
+                raise
+            finally:
+                metrics.record(op, time.perf_counter() - t0, thread_id=thread_id, ok=ok)
+
+        t0 = time.perf_counter()
+        ok = True
+        with tracer.start_as_current_span(f"swarmstate.checkpoint.{op}") as span:
+            try:
+                for key, value in attrs.items():
+                    if value is not None:
+                        span.set_attribute(f"swarmstate.{key}", value)
+            except Exception:
+                pass
+            try:
+                return fn()
+            except BaseException as exc:
+                ok = False
+                _mark_span_error(span, exc)
+                raise
+            finally:
+                if metrics is not None:
+                    metrics.record(op, time.perf_counter() - t0, thread_id=thread_id, ok=ok)
 
     # ------------------------------------------------------------------ sync
 
@@ -100,22 +167,21 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        if self._metrics is None:
+        if self._metrics is None and self._tracer is None:
             return self._put_impl(config, checkpoint, metadata, new_versions)
-        t0 = time.perf_counter()
-        ok = True
-        try:
-            return self._put_impl(config, checkpoint, metadata, new_versions)
-        except BaseException:
-            ok = False
-            raise
-        finally:
-            self._metrics.record(
-                "put",
-                time.perf_counter() - t0,
-                thread_id=config["configurable"]["thread_id"],
-                ok=ok,
-            )
+        cfg = config["configurable"]
+        attrs = {
+            "thread_id": cfg["thread_id"],
+            "checkpoint_ns": cfg.get("checkpoint_ns", ""),
+            "checkpoint_id": checkpoint["id"],
+            "incremental": self.incremental,
+        }
+        return self._run(
+            "put",
+            cfg["thread_id"],
+            attrs,
+            lambda: self._put_impl(config, checkpoint, metadata, new_versions),
+        )
 
     def _put_impl(
         self,
@@ -175,22 +241,22 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         task_id: str,
         task_path: str = "",
     ) -> None:
-        if self._metrics is None:
+        if self._metrics is None and self._tracer is None:
             return self._put_writes_impl(config, writes, task_id, task_path)
-        t0 = time.perf_counter()
-        ok = True
-        try:
-            return self._put_writes_impl(config, writes, task_id, task_path)
-        except BaseException:
-            ok = False
-            raise
-        finally:
-            self._metrics.record(
-                "put_writes",
-                time.perf_counter() - t0,
-                thread_id=config["configurable"]["thread_id"],
-                ok=ok,
-            )
+        cfg = config["configurable"]
+        attrs = {
+            "thread_id": cfg["thread_id"],
+            "checkpoint_ns": cfg.get("checkpoint_ns", ""),
+            "checkpoint_id": cfg.get("checkpoint_id"),
+            "task_id": task_id,
+            "writes": len(writes),
+        }
+        return self._run(
+            "put_writes",
+            cfg["thread_id"],
+            attrs,
+            lambda: self._put_writes_impl(config, writes, task_id, task_path),
+        )
 
     def _put_writes_impl(
         self,
@@ -215,22 +281,15 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
             self.store.set(ns, key, [task_id, channel, [v_type, v_bytes], task_path])
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
-        if self._metrics is None:
+        if self._metrics is None and self._tracer is None:
             return self._get_tuple_impl(config)
-        t0 = time.perf_counter()
-        ok = True
-        try:
-            return self._get_tuple_impl(config)
-        except BaseException:
-            ok = False
-            raise
-        finally:
-            self._metrics.record(
-                "get_tuple",
-                time.perf_counter() - t0,
-                thread_id=config["configurable"]["thread_id"],
-                ok=ok,
-            )
+        cfg = config["configurable"]
+        attrs = {
+            "thread_id": cfg["thread_id"],
+            "checkpoint_ns": cfg.get("checkpoint_ns", ""),
+            "checkpoint_id": get_checkpoint_id(config),
+        }
+        return self._run("get_tuple", cfg["thread_id"], attrs, lambda: self._get_tuple_impl(config))
 
     def _get_tuple_impl(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         thread_id = config["configurable"]["thread_id"]

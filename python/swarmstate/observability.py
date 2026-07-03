@@ -1,9 +1,21 @@
-"""Optional metrics hooks for checkpoint operations.
+"""Optional metrics and tracing hooks for checkpoint operations.
 
 The checkpointer ([`SwarmStateSaver`][swarmstate.integrations.langgraph.SwarmStateSaver])
 can report the latency and outcome of each `put` / `put_writes` / `get_tuple` to a
-**metrics sink**. This is opt-in and has **zero overhead when unused** (the default is
-no sink at all).
+**metrics sink**, and/or run each one inside an **OpenTelemetry span**. Both are opt-in
+and have **zero overhead when unused** (the defaults are no sink and no tracer).
+
+Tracing::
+
+    from swarmstate.integrations.langgraph import SwarmStateSaver
+    from swarmstate.observability import get_tracer
+
+    saver = SwarmStateSaver(tracer=get_tracer())   # needs the [otel] extra
+
+Each operation becomes a ``swarmstate.checkpoint.<op>`` span carrying
+``swarmstate.thread_id`` / ``swarmstate.checkpoint_ns`` / ``swarmstate.checkpoint_id``
+attributes; failures record the exception and set the span status to ERROR. Metrics and
+tracing compose, so you can pass ``metrics=`` and ``tracer=`` together.
 
 A sink is anything with a ``record`` method::
 
@@ -131,4 +143,21 @@ class OpenTelemetryMetrics:
         self._ops.add(1, attributes=attrs)
 
 
-__all__ = ["InMemoryMetrics", "MetricsSink", "NullMetrics", "OpenTelemetryMetrics"]
+def get_tracer(name: str = "swarmstate") -> Any:
+    """Return an OpenTelemetry ``Tracer`` for use with ``SwarmStateSaver(tracer=...)``.
+
+    Thin wrapper over ``opentelemetry.trace.get_tracer`` with a lazy import, so the
+    module still imports without the ``[otel]`` extra installed.
+    """
+    from opentelemetry import trace
+
+    return trace.get_tracer(name)
+
+
+__all__ = [
+    "InMemoryMetrics",
+    "MetricsSink",
+    "NullMetrics",
+    "OpenTelemetryMetrics",
+    "get_tracer",
+]

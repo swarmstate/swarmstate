@@ -68,6 +68,14 @@ saver = SwarmStateSaver(metrics=metrics)
 metrics.summary()   # {"put": {"count": 12, "p50_ms": 0.006, ...}, "get_tuple": {...}}
 ```
 
+OpenTelemetry tracing (each checkpoint op becomes a `swarmstate.checkpoint.<op>` span):
+
+```python
+from swarmstate.observability import get_tracer     # needs swarmstate[otel]
+
+saver = SwarmStateSaver(tracer=get_tracer())         # composes with metrics=...
+```
+
 ## Status
 
 Early development.
@@ -88,9 +96,9 @@ Early development.
   `SwarmStateStorage` (portable memory backed by a shared `Store`).
 - **M6 (docs · wheels · PyPI)** ✅ - full docs site, benchmarks, cross-platform abi3
   wheels, and PyPI publishing via Trusted Publishing (OIDC).
-- **Observability** ✅ - opt-in metrics hooks on checkpoint ops (`put` / `put_writes` /
-  `get_tuple`), with an in-memory sink and an OpenTelemetry sink (`swarmstate[otel]`).
-  Zero overhead when unused. Strict `mypy` in CI.
+- **Observability** ✅ - opt-in metrics hooks and OpenTelemetry **tracing** on checkpoint
+  ops (`put` / `put_writes` / `get_tuple`): an in-memory sink, an OpenTelemetry metrics
+  sink, and per-op spans (`swarmstate[otel]`). Zero overhead when unused. Strict `mypy` in CI.
 
 ## Examples
 
