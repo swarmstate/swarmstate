@@ -1,26 +1,27 @@
-"""CrewAI memory storage backed by a swarmstate :class:`~swarmstate.Store`.
+"""Durable, portable memory for CrewAI crews, backed by a swarmstate ``Store``.
 
-``SwarmStateStorage`` implements CrewAI's storage protocol — ``save(value,
-metadata)``, ``search(query, limit, score_threshold)``, ``reset()`` — so a
-CrewAI crew's memory persists in a swarmstate ``Store`` and is therefore
-**shareable and portable** across processes and frameworks (same store as your
-LangGraph checkpoints; see the portability guide).
-
-Because it only *implements the protocol* (it does not import CrewAI), it is
-independent of any CrewAI version — wire it into your crew's memory/storage
-where CrewAI accepts a storage object:
+``SwarmStateStorage`` is a small, dependency-free **keyword** memory store:
+``save(value, metadata)`` / ``search(query, limit, score_threshold)`` / ``reset()``,
+persisted in a swarmstate ``Store`` (in-memory, or ``RedisStore``/``DiskStore`` for
+durability). Its point is **state portability**: crew memories live in the same
+store as your LangGraph checkpoints and can be read by any other system.
 
     import swarmstate as ss
     from swarmstate.integrations.crewai import SwarmStateStorage
 
-    store = ss.Store()                       # or RedisStore(...) for persistence
-    storage = SwarmStateStorage(store, namespace="crew:research")
-    # pass `storage` to CrewAI's memory (e.g. ExternalMemory/RAGStorage slot)
+    store = ss.Store()                       # or RedisStore(...) / DiskStore(...)
+    mem = SwarmStateStorage(store, namespace="crew:research")
+    mem.save("The Q2 churn rate was 4.1%", {"agent": "analyst"})
+    mem.search("churn rate")                 # lexical (token-overlap) recall
 
-!!! note
-    Search here is **lexical** (token-overlap), not embedding-based semantic
-    retrieval. It is deterministic and dependency-free; for semantic recall use
-    CrewAI's RAG storage. A first-class, embedding-aware adapter may follow.
+.. important::
+    This is **not** a drop-in for CrewAI's built-in memory. As of CrewAI 1.x, the
+    native ``StorageBackend`` protocol is **embedding-based** (``save(list[MemoryRecord])``,
+    ``search(query_embedding, ...)``) — a vector store, which swarmstate is not.
+    ``SwarmStateStorage`` is a lightweight *lexical* alternative you wire in yourself
+    (e.g. from a task callback or your own loop) when you want durable, portable,
+    dependency-free recall; for semantic RAG recall, use CrewAI's own storage.
+    Verified against crewai 1.15.
 """
 
 from __future__ import annotations
@@ -38,11 +39,14 @@ def _tokens(text: str) -> set[str]:
 
 
 class SwarmStateStorage:
-    """A CrewAI-compatible storage object persisting entries in a ``Store``.
+    """A lightweight, portable keyword memory store backed by a ``Store``.
+
+    Not CrewAI's embedding-based ``StorageBackend`` — a simple lexical store you
+    wire in yourself for durable, shareable recall (see the module docstring).
 
     Args:
         store: the backing store (in-memory ``Store`` or a persistent backend
-            such as ``RedisStore``). Defaults to a fresh ``Store()``.
+            such as ``RedisStore``/``DiskStore``). Defaults to a fresh ``Store()``.
         namespace: the store namespace to keep this memory under.
     """
 
@@ -56,7 +60,7 @@ class SwarmStateStorage:
         return f"{n:012d}"
 
     def save(self, value: Any, metadata: Optional[dict] = None) -> None:
-        """Persist a memory ``value`` with optional ``metadata`` (CrewAI protocol)."""
+        """Persist a memory ``value`` with optional ``metadata``."""
         self.store.set(
             self.namespace,
             self._next_key(),
@@ -91,7 +95,7 @@ class SwarmStateStorage:
         ]
 
     def reset(self) -> None:
-        """Clear all stored memory in this namespace (CrewAI protocol)."""
+        """Clear all stored memory in this namespace."""
         for key in self.store.keys(self.namespace):
             self.store.delete(self.namespace, key)
 

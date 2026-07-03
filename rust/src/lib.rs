@@ -8,6 +8,7 @@
 //! store (M1), the handoff graph (M2), and the codec used by both.
 
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 
 mod codec;
 mod condition;
@@ -25,11 +26,25 @@ fn core_version() -> &'static str {
     CORE_VERSION
 }
 
+/// Serialize a Python object to msgpack bytes (swarmstate's stable, cross-language codec).
+#[pyfunction]
+fn dumps<'py>(py: Python<'py>, obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyBytes>> {
+    Ok(PyBytes::new(py, &codec::encode(obj)?))
+}
+
+/// Deserialize msgpack bytes back into a Python object.
+#[pyfunction]
+fn loads<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyAny>> {
+    codec::decode(py, data)
+}
+
 /// The `swarmstate._core` native module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", CORE_VERSION)?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
+    m.add_function(wrap_pyfunction!(dumps, m)?)?;
+    m.add_function(wrap_pyfunction!(loads, m)?)?;
     m.add_class::<store::Store>()?;
     m.add_class::<store::Snapshot>()?;
     m.add_class::<graph::HandoffGraph>()?;

@@ -11,6 +11,14 @@ def core_version() -> str:
     """Return the version string of the compiled Rust core."""
     ...
 
+def dumps(obj: Any) -> bytes:
+    """Serialize a Python object to msgpack bytes (stable, cross-language codec)."""
+    ...
+
+def loads(data: bytes) -> Any:
+    """Deserialize msgpack bytes back into a Python object."""
+    ...
+
 class Snapshot:
     """A cheap, immutable point-in-time view of a :class:`Store`."""
 
