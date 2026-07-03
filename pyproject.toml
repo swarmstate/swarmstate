@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "swarmstate"
-version = "0.7.0"
+version = "0.8.0"
 description = "Drop-in state backend for LangGraph, CrewAI & custom agent loops — Rust core, framework-agnostic, built for production."
 readme = "README.md"
 license = { text = "MIT" }
@@ -26,10 +26,11 @@ langgraph = ["langgraph>=0.2"]
 crewai = ["crewai>=0.70"]
 redis = ["redis>=5.0", "msgpack>=1.0"]
 disk = ["msgpack>=1.0"]
+postgres = ["psycopg[binary]>=3.1", "msgpack>=1.0"]
 docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 bench = ["swarmstate[langgraph]", "langgraph-checkpoint-sqlite>=2.0", "matplotlib>=3.8"]
-all = ["swarmstate[langgraph,crewai,redis,disk]"]
+all = ["swarmstate[langgraph,crewai,redis,disk,postgres]"]
 
 [project.urls]
 Homepage = "https://github.com/swarmstate/swarmstate"
