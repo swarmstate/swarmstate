@@ -190,8 +190,9 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        cfg = config["configurable"]
+        thread_id = cfg["thread_id"]
+        checkpoint_ns = cfg.get("checkpoint_ns", "")
         checkpoint_id = checkpoint["id"]
 
         cp_to_store = checkpoint
@@ -219,7 +220,7 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
             {
                 "cp": [cp_type, cp_bytes],
                 "md": [md_type, md_bytes],
-                "parent": config["configurable"].get("checkpoint_id"),
+                "parent": cfg.get("checkpoint_id"),
             },
         )
         key = (thread_id, checkpoint_ns)
@@ -265,9 +266,10 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         task_id: str,
         task_path: str = "",
     ) -> None:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
-        checkpoint_id = config["configurable"]["checkpoint_id"]
+        cfg = config["configurable"]
+        thread_id = cfg["thread_id"]
+        checkpoint_ns = cfg.get("checkpoint_ns", "")
+        checkpoint_id = cfg["checkpoint_id"]
         ns = _writes_ns(thread_id, checkpoint_ns, checkpoint_id)
 
         for idx, (channel, value) in enumerate(writes):
@@ -292,8 +294,9 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         return self._run("get_tuple", cfg["thread_id"], attrs, lambda: self._get_tuple_impl(config))
 
     def _get_tuple_impl(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
-        thread_id = config["configurable"]["thread_id"]
-        checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
+        cfg = config["configurable"]
+        thread_id = cfg["thread_id"]
+        checkpoint_ns = cfg.get("checkpoint_ns", "")
         ns = _ckpt_ns(thread_id, checkpoint_ns)
 
         checkpoint_id = get_checkpoint_id(config)

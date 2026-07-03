@@ -3,61 +3,61 @@
     "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
     "python": "3.14.6",
     "processor": "arm",
-    "swarmstate": "0.6.0",
+    "swarmstate": "0.9.1",
     "iters": 2000,
     "warmup": 200,
     "seed": 7,
     "payload_msgs": 20,
     "note": "SwarmStateSaver and InMemorySaver are in-memory; SqliteSaver is file-backed (persistent). Warm cache.",
-    "put_speedup_vs_sqlite": 11.3
+    "put_speedup_vs_sqlite": 10.6
   },
   "checkpointer": {
     "SwarmStateSaver": {
       "put": {
-        "p50_ms": 0.0058,
-        "p99_ms": 0.013,
-        "mean_ms": 0.0064,
-        "min_ms": 0.0049,
-        "ops_per_s": 155071.5
+        "p50_ms": 0.0068,
+        "p99_ms": 0.0147,
+        "mean_ms": 0.0072,
+        "min_ms": 0.0052,
+        "ops_per_s": 138610.6
       },
       "get_tuple": {
-        "p50_ms": 0.0077,
-        "p99_ms": 0.0089,
-        "mean_ms": 0.0077,
-        "min_ms": 0.0074,
-        "ops_per_s": 129466.7
+        "p50_ms": 0.0085,
+        "p99_ms": 0.0132,
+        "mean_ms": 0.0086,
+        "min_ms": 0.0075,
+        "ops_per_s": 116320.8
       }
     },
     "InMemorySaver": {
       "put": {
-        "p50_ms": 0.0041,
-        "p99_ms": 0.009,
-        "mean_ms": 0.0056,
-        "min_ms": 0.0038,
-        "ops_per_s": 177049.4
+        "p50_ms": 0.0042,
+        "p99_ms": 0.0091,
+        "mean_ms": 0.0058,
+        "min_ms": 0.004,
+        "ops_per_s": 170943.3
       },
       "get_tuple": {
-        "p50_ms": 0.0436,
-        "p99_ms": 0.0476,
-        "mean_ms": 0.0437,
-        "min_ms": 0.043,
-        "ops_per_s": 22869.3
+        "p50_ms": 0.0443,
+        "p99_ms": 0.1083,
+        "mean_ms": 0.0483,
+        "min_ms": 0.0412,
+        "ops_per_s": 20683.0
       }
     },
     "SqliteSaver": {
       "put": {
-        "p50_ms": 0.0654,
-        "p99_ms": 0.1182,
-        "mean_ms": 0.0789,
-        "min_ms": 0.0583,
-        "ops_per_s": 12667.0
+        "p50_ms": 0.072,
+        "p99_ms": 0.1411,
+        "mean_ms": 0.087,
+        "min_ms": 0.0581,
+        "ops_per_s": 11499.4
       },
       "get_tuple": {
-        "p50_ms": 0.0141,
-        "p99_ms": 0.0167,
-        "mean_ms": 0.0142,
-        "min_ms": 0.0138,
-        "ops_per_s": 70285.5
+        "p50_ms": 0.0143,
+        "p99_ms": 0.0175,
+        "mean_ms": 0.0144,
+        "min_ms": 0.0137,
+        "ops_per_s": 69411.2
       }
     }
   },
@@ -69,16 +69,16 @@
       50000
     ],
     "store_snapshot_ms": [
-      0.00045,
+      0.00044,
+      0.00039,
       0.00036,
-      0.00036,
-      0.0004
+      0.00038
     ],
     "dict_deepcopy_ms": [
-      0.08655,
-      0.83133,
-      8.88153,
-      50.12565
+      0.08377,
+      0.8439,
+      9.16306,
+      52.31811
     ]
   },
   "concurrency": {
@@ -89,16 +89,16 @@
       8
     ],
     "store_ops_s": [
-      1264472,
-      399319,
-      185561,
-      137858
+      1236180,
+      373044,
+      192447,
+      137784
     ],
     "dict_lock_ops_s": [
-      6921164,
-      3314299,
-      6722430,
-      6507769
+      7008271,
+      3095990,
+      6522714,
+      6460916
     ]
   }
 }

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "swarmstate"
-version = "0.9.1"
+version = "0.9.2"
 description = "Drop-in state backend for LangGraph, CrewAI & custom agent loops - Rust core, framework-agnostic, built for production."
 readme = "README.md"
 license = { text = "MIT" }

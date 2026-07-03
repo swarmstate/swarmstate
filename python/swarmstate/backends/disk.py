@@ -58,7 +58,12 @@ class DiskStore:
         self.codec = codec
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        # WAL + synchronous=NORMAL is the recommended durable-yet-fast config: it
+        # avoids an fsync on every checkpoint commit (the hot path here) while
+        # remaining crash-safe (only the last transactions can be lost on power
+        # loss, never a corrupt file).
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS kv (ns TEXT NOT NULL, k TEXT NOT NULL, "
             "v BLOB NOT NULL, PRIMARY KEY (ns, k))"

@@ -11,7 +11,7 @@
 //! single global lock. The GIL is released (`py.allow_threads`) around every
 //! lock/map operation; only (de)serialization runs under the GIL.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -159,11 +159,16 @@ pub struct Store {
     shards: Vec<RwLock<NsMap>>,
     codec_name: String,
     max_history: Option<usize>,
-    history: RwLock<Vec<Arc<SnapshotData>>>,
+    // VecDeque so trimming to `max_history` is an O(1) pop_front, not an O(n)
+    // Vec shift.
+    history: RwLock<VecDeque<Arc<SnapshotData>>>,
     counter: AtomicU64,
     last_id: RwLock<Option<u64>>,
     // Running total of stored value bytes, kept incrementally so snapshot()
-    // stays O(1) instead of summing over every value.
+    // stays O(1) instead of summing over every value. Relaxed ordering is
+    // sufficient: every mutation happens under a shard lock and every read
+    // (snapshot) holds all shard read locks, so the locks establish the needed
+    // happens-before; the atomic only needs update atomicity, not ordering.
     total_bytes: AtomicUsize,
 }
 
@@ -192,7 +197,7 @@ impl Store {
             shards: (0..SHARDS).map(|_| RwLock::new(NsMap::new())).collect(),
             codec_name: codec.to_string(),
             max_history,
-            history: RwLock::new(Vec::new()),
+            history: RwLock::new(VecDeque::new()),
             counter: AtomicU64::new(1),
             last_id: RwLock::new(None),
             total_bytes: AtomicUsize::new(0),
@@ -233,10 +238,10 @@ impl Store {
             };
             if new_len >= old_len {
                 self.total_bytes
-                    .fetch_add(new_len - old_len, Ordering::SeqCst);
+                    .fetch_add(new_len - old_len, Ordering::Relaxed);
             } else {
                 self.total_bytes
-                    .fetch_sub(old_len - new_len, Ordering::SeqCst);
+                    .fetch_sub(old_len - new_len, Ordering::Relaxed);
             }
         });
         Ok(())
@@ -276,7 +281,7 @@ impl Store {
             match guard.get_mut(namespace) {
                 Some(ns) => match ns.remove(key) {
                     Some(old) => {
-                        self.total_bytes.fetch_sub(old.len(), Ordering::SeqCst);
+                        self.total_bytes.fetch_sub(old.len(), Ordering::Relaxed);
                         true
                     }
                     None => false,
@@ -325,7 +330,7 @@ impl Store {
             for shard in &self.shards {
                 shard.write().unwrap().clear();
             }
-            self.total_bytes.store(0, Ordering::SeqCst);
+            self.total_bytes.store(0, Ordering::Relaxed);
         });
     }
 
@@ -337,10 +342,10 @@ impl Store {
         let data = py.allow_threads(|| {
             let guards: Vec<_> = self.shards.iter().map(|s| s.read().unwrap()).collect();
             let shards: Vec<NsMap> = guards.iter().map(|g| (**g).clone()).collect();
-            let size_bytes = self.total_bytes.load(Ordering::SeqCst);
+            let size_bytes = self.total_bytes.load(Ordering::Relaxed);
             drop(guards);
 
-            let id = self.counter.fetch_add(1, Ordering::SeqCst);
+            let id = self.counter.fetch_add(1, Ordering::Relaxed);
             let parent = {
                 let mut last = self.last_id.write().unwrap();
                 let prev = *last;
@@ -355,10 +360,10 @@ impl Store {
                 shards,
             });
             let mut hist = self.history.write().unwrap();
-            hist.push(data.clone());
+            hist.push_back(data.clone());
             if let Some(max) = self.max_history {
                 while hist.len() > max {
-                    hist.remove(0);
+                    hist.pop_front();
                 }
             }
             data
@@ -374,7 +379,7 @@ impl Store {
                 **g = snapshot.data.shards[i].clone();
             }
             self.total_bytes
-                .store(snapshot.data.size_bytes, Ordering::SeqCst);
+                .store(snapshot.data.size_bytes, Ordering::Relaxed);
         });
     }
 
