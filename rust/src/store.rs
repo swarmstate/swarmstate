@@ -6,13 +6,15 @@
 //! [`Store::snapshot`] is cheap and snapshots are fully isolated from later
 //! mutations (copy-on-write).
 //!
-//! The GIL is released (`py.allow_threads`) around every lock acquisition and
-//! map operation; only (de)serialization — which touches Python objects —
-//! runs under the GIL.
+//! Writes are **sharded**: namespaces are hashed across `SHARDS` independent
+//! `RwLock`s, so concurrent writers to different namespaces don't contend on a
+//! single global lock. The GIL is released (`py.allow_threads`) around every
+//! lock/map operation; only (de)serialization runs under the GIL.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use im::HashMap as ImMap;
@@ -23,6 +25,17 @@ use crate::codec;
 
 /// `namespace -> (key -> value bytes)`.
 type NsMap = ImMap<String, ImMap<String, Vec<u8>>>;
+
+/// Number of lock shards. Namespaces are hashed across these so writes to
+/// different namespaces proceed in parallel.
+const SHARDS: usize = 16;
+
+/// Which shard a namespace lives in (deterministic within a process).
+fn shard_index(namespace: &str) -> usize {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    namespace.hash(&mut h);
+    (h.finish() as usize) % SHARDS
+}
 
 /// Seconds since the Unix epoch as a float (0.0 if the clock is before epoch).
 fn now_secs() -> f64 {
@@ -38,13 +51,19 @@ struct SnapshotData {
     timestamp: f64,
     parent: Option<u64>,
     size_bytes: usize,
-    map: NsMap,
+    shards: Vec<NsMap>,
 }
 
 /// A cheap, immutable point-in-time view of a [`Store`].
 #[pyclass(module = "swarmstate._core", frozen)]
 pub struct Snapshot {
-    data: std::sync::Arc<SnapshotData>,
+    data: Arc<SnapshotData>,
+}
+
+impl Snapshot {
+    fn ns_lookup<'a>(&'a self, ns: &str) -> Option<&'a ImMap<String, Vec<u8>>> {
+        self.data.shards[shard_index(ns)].get(ns)
+    }
 }
 
 #[pymethods]
@@ -77,9 +96,11 @@ impl Snapshot {
     #[getter]
     fn keys(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for (ns, kv) in self.data.map.iter() {
-            for k in kv.keys() {
-                out.push((ns.clone(), k.clone()));
+        for shard in &self.data.shards {
+            for (ns, kv) in shard.iter() {
+                for k in kv.keys() {
+                    out.push((ns.clone(), k.clone()));
+                }
             }
         }
         out
@@ -94,21 +115,25 @@ impl Snapshot {
         let mut removed = Vec::new();
         let mut changed = Vec::new();
 
-        for (ns, kv) in self.data.map.iter() {
-            let base_ns = base.data.map.get(ns);
-            for (k, v) in kv.iter() {
-                match base_ns.and_then(|b| b.get(k)) {
-                    None => added.push((ns.clone(), k.clone())),
-                    Some(bv) if bv != v => changed.push((ns.clone(), k.clone())),
-                    _ => {}
+        for shard in &self.data.shards {
+            for (ns, kv) in shard.iter() {
+                let base_ns = base.ns_lookup(ns);
+                for (k, v) in kv.iter() {
+                    match base_ns.and_then(|b| b.get(k)) {
+                        None => added.push((ns.clone(), k.clone())),
+                        Some(bv) if bv != v => changed.push((ns.clone(), k.clone())),
+                        _ => {}
+                    }
                 }
             }
         }
-        for (ns, kv) in base.data.map.iter() {
-            let self_ns = self.data.map.get(ns);
-            for k in kv.keys() {
-                if self_ns.map(|s| !s.contains_key(k)).unwrap_or(true) {
-                    removed.push((ns.clone(), k.clone()));
+        for shard in &base.data.shards {
+            for (ns, kv) in shard.iter() {
+                let self_ns = self.ns_lookup(ns);
+                for k in kv.keys() {
+                    if self_ns.map(|s| !s.contains_key(k)).unwrap_or(true) {
+                        removed.push((ns.clone(), k.clone()));
+                    }
                 }
             }
         }
@@ -131,15 +156,21 @@ impl Snapshot {
 /// Framework-agnostic state store with immutable snapshots.
 #[pyclass(module = "swarmstate._core")]
 pub struct Store {
-    inner: RwLock<NsMap>,
+    shards: Vec<RwLock<NsMap>>,
     codec_name: String,
     max_history: Option<usize>,
-    history: RwLock<Vec<std::sync::Arc<SnapshotData>>>,
+    history: RwLock<Vec<Arc<SnapshotData>>>,
     counter: AtomicU64,
     last_id: RwLock<Option<u64>>,
     // Running total of stored value bytes, kept incrementally so snapshot()
     // stays O(1) instead of summing over every value.
     total_bytes: AtomicUsize,
+}
+
+impl Store {
+    fn shard(&self, namespace: &str) -> &RwLock<NsMap> {
+        &self.shards[shard_index(namespace)]
+    }
 }
 
 #[pymethods]
@@ -158,7 +189,7 @@ impl Store {
             )));
         }
         Ok(Store {
-            inner: RwLock::new(NsMap::new()),
+            shards: (0..SHARDS).map(|_| RwLock::new(NsMap::new())).collect(),
             codec_name: codec.to_string(),
             max_history,
             history: RwLock::new(Vec::new()),
@@ -191,7 +222,7 @@ impl Store {
         let bytes = codec::encode(value)?; // touches Python -> under GIL
         py.allow_threads(|| {
             let new_len = bytes.len();
-            let mut guard = self.inner.write().unwrap();
+            let mut guard = self.shard(&namespace).write().unwrap();
             let old_len = if let Some(ns) = guard.get_mut(&namespace) {
                 ns.insert(key, bytes).map(|old| old.len()).unwrap_or(0)
             } else {
@@ -200,7 +231,6 @@ impl Store {
                 guard.insert(namespace, ns);
                 0
             };
-            // Keep the running byte total in sync (delta = new - old).
             if new_len >= old_len {
                 self.total_bytes
                     .fetch_add(new_len - old_len, Ordering::SeqCst);
@@ -222,7 +252,7 @@ impl Store {
         default: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let bytes = py.allow_threads(|| {
-            let guard = self.inner.read().unwrap();
+            let guard = self.shard(namespace).read().unwrap();
             guard.get(namespace).and_then(|ns| ns.get(key)).cloned()
         });
         match bytes {
@@ -234,7 +264,7 @@ impl Store {
     /// Return whether `(namespace, key)` exists.
     fn contains(&self, py: Python<'_>, namespace: &str, key: &str) -> bool {
         py.allow_threads(|| {
-            let guard = self.inner.read().unwrap();
+            let guard = self.shard(namespace).read().unwrap();
             guard.get(namespace).is_some_and(|ns| ns.contains_key(key))
         })
     }
@@ -242,7 +272,7 @@ impl Store {
     /// Delete `(namespace, key)`. Returns True if a value was removed.
     fn delete(&self, py: Python<'_>, namespace: &str, key: &str) -> bool {
         py.allow_threads(|| {
-            let mut guard = self.inner.write().unwrap();
+            let mut guard = self.shard(namespace).write().unwrap();
             match guard.get_mut(namespace) {
                 Some(ns) => match ns.remove(key) {
                     Some(old) => {
@@ -259,7 +289,7 @@ impl Store {
     /// All keys within `namespace` (empty list if the namespace is unknown).
     fn keys(&self, py: Python<'_>, namespace: &str) -> Vec<String> {
         py.allow_threads(|| {
-            let guard = self.inner.read().unwrap();
+            let guard = self.shard(namespace).read().unwrap();
             guard
                 .get(namespace)
                 .map(|ns| ns.keys().cloned().collect())
@@ -270,32 +300,46 @@ impl Store {
     /// All namespaces currently in the store.
     fn namespaces(&self, py: Python<'_>) -> Vec<String> {
         py.allow_threads(|| {
-            let guard = self.inner.read().unwrap();
-            guard.keys().cloned().collect()
+            let mut out = Vec::new();
+            for shard in &self.shards {
+                let guard = shard.read().unwrap();
+                out.extend(guard.keys().cloned());
+            }
+            out
         })
     }
 
     /// Total number of `(namespace, key)` entries.
     fn __len__(&self, py: Python<'_>) -> usize {
         py.allow_threads(|| {
-            let guard = self.inner.read().unwrap();
-            guard.values().map(|ns| ns.len()).sum()
+            self.shards
+                .iter()
+                .map(|s| s.read().unwrap().values().map(|ns| ns.len()).sum::<usize>())
+                .sum()
         })
     }
 
     /// Remove all entries (does not clear snapshot history).
     fn clear(&self, py: Python<'_>) {
         py.allow_threads(|| {
-            let mut guard = self.inner.write().unwrap();
-            guard.clear();
+            for shard in &self.shards {
+                shard.write().unwrap().clear();
+            }
             self.total_bytes.store(0, Ordering::SeqCst);
         });
     }
 
     /// Capture a cheap, immutable snapshot of the current state.
+    ///
+    /// Read-locks every shard (in order) so the clone is a consistent
+    /// point-in-time view, then clones each shard map (O(1) structural share).
     fn snapshot(&self, py: Python<'_>) -> Snapshot {
         let data = py.allow_threads(|| {
-            let map = self.inner.read().unwrap().clone(); // O(1) structural share
+            let guards: Vec<_> = self.shards.iter().map(|s| s.read().unwrap()).collect();
+            let shards: Vec<NsMap> = guards.iter().map(|g| (**g).clone()).collect();
+            let size_bytes = self.total_bytes.load(Ordering::SeqCst);
+            drop(guards);
+
             let id = self.counter.fetch_add(1, Ordering::SeqCst);
             let parent = {
                 let mut last = self.last_id.write().unwrap();
@@ -303,13 +347,12 @@ impl Store {
                 *last = Some(id);
                 prev
             };
-            let size_bytes = self.total_bytes.load(Ordering::SeqCst);
-            let data = std::sync::Arc::new(SnapshotData {
+            let data = Arc::new(SnapshotData {
                 id,
                 timestamp: now_secs(),
                 parent,
                 size_bytes,
-                map,
+                shards,
             });
             let mut hist = self.history.write().unwrap();
             hist.push(data.clone());
@@ -326,8 +369,10 @@ impl Store {
     /// Roll the store back to a previously captured snapshot.
     fn restore(&self, py: Python<'_>, snapshot: &Snapshot) {
         py.allow_threads(|| {
-            let mut guard = self.inner.write().unwrap();
-            *guard = snapshot.data.map.clone();
+            let mut guards: Vec<_> = self.shards.iter().map(|s| s.write().unwrap()).collect();
+            for (i, g) in guards.iter_mut().enumerate() {
+                **g = snapshot.data.shards[i].clone();
+            }
             self.total_bytes
                 .store(snapshot.data.size_bytes, Ordering::SeqCst);
         });
@@ -358,7 +403,6 @@ mod tests {
             let snap = store.snapshot(py);
             assert_eq!(store.__len__(py), 1);
 
-            // Mutate after the snapshot; the snapshot must be unaffected.
             let v2 = PyDict::new(py);
             v2.set_item("step", 2i64).unwrap();
             store.set(py, "wf".into(), "a".into(), v2.as_any()).unwrap();
@@ -400,6 +444,23 @@ mod tests {
             assert_eq!(d["removed"], vec![("n".to_string(), "drop".to_string())]);
             assert_eq!(d["changed"], vec![("n".to_string(), "keep".to_string())]);
             assert_eq!(now.parent(), Some(base.id()));
+        });
+    }
+
+    #[test]
+    fn spreads_namespaces_across_shards() {
+        Python::with_gil(|py| {
+            let store = Store::new("memory", "msgpack", None).unwrap();
+            let v = 1i64.into_pyobject(py).unwrap().into_any();
+            for i in 0..100 {
+                store.set(py, format!("ns{i}"), "k".into(), &v).unwrap();
+            }
+            assert_eq!(store.__len__(py), 100);
+            assert_eq!(store.namespaces(py).len(), 100);
+            // at least a few distinct shards are used
+            let used: std::collections::HashSet<usize> =
+                (0..100).map(|i| shard_index(&format!("ns{i}"))).collect();
+            assert!(used.len() > 1);
         });
     }
 }
