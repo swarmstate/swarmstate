@@ -21,6 +21,7 @@ Requires the ``langgraph`` extra: ``pip install "swarmstate[langgraph]"``.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any, Optional
 
@@ -51,6 +52,10 @@ def _writes_ns(thread_id: str, checkpoint_ns: str, checkpoint_id: str) -> str:
     return f"wr{_SEP}{thread_id}{_SEP}{checkpoint_ns}{_SEP}{checkpoint_id}"
 
 
+def _blobs_ns(thread_id: str, checkpoint_ns: str) -> str:
+    return f"bl{_SEP}{thread_id}{_SEP}{checkpoint_ns}"
+
+
 class SwarmStateSaver(BaseCheckpointSaver[str]):
     """A LangGraph checkpointer backed by a swarmstate :class:`~swarmstate.Store`.
 
@@ -58,6 +63,11 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         store: underlying store; defaults to a fresh in-memory ``Store()``.
             Share one ``Store`` across savers/graphs for a unified checkpoint DB.
         serde: optional LangGraph serializer (defaults to ``JsonPlusSerializer``).
+        incremental: if True, store each channel value once per version (dedup)
+            instead of the whole checkpoint blob per step. Saves storage and
+            serialization for long threads with large, mostly-stable channels,
+            at the cost of extra reads on ``get_tuple`` (one per channel). The
+            default (False) keeps ``get_tuple`` at a single read.
     """
 
     def __init__(
@@ -65,9 +75,11 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         store: Optional[Store] = None,
         *,
         serde: Optional[SerializerProtocol] = None,
+        incremental: bool = False,
     ) -> None:
         super().__init__(serde=serde)
         self.store: Store = store if store is not None else Store()
+        self.incremental = incremental
         # O(1) "latest checkpoint id" cache per (thread_id, checkpoint_ns).
         # A best-effort fast path for get_tuple; always falls back to a scan.
         self._latest: dict[tuple[str, str], str] = {}
@@ -85,7 +97,24 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = checkpoint["id"]
 
-        cp_type, cp_bytes = self.serde.dumps_typed(checkpoint)
+        cp_to_store = checkpoint
+        if self.incremental:
+            # Store each new channel value once, keyed by (channel, version);
+            # serialize the checkpoint without its inline channel_values.
+            cp_to_store = {**checkpoint}
+            values = cp_to_store.pop("channel_values", {})
+            bl_ns = _blobs_ns(thread_id, checkpoint_ns)
+            for ch, ver in new_versions.items():
+                bkey = f"{ch}{_SEP}{ver}"
+                if self.store.contains(bl_ns, bkey):
+                    continue  # this exact value/version is already stored
+                if ch in values:
+                    vt, vb = self.serde.dumps_typed(values[ch])
+                    self.store.set(bl_ns, bkey, ["v", vt, vb])
+                else:
+                    self.store.set(bl_ns, bkey, ["empty"])
+
+        cp_type, cp_bytes = self.serde.dumps_typed(cp_to_store)
         md_type, md_bytes = self.serde.dumps_typed(get_checkpoint_metadata(config, metadata))
         self.store.set(
             _ckpt_ns(thread_id, checkpoint_ns),
@@ -211,8 +240,9 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
             del self._latest[k]
 
     # ------------------------------------------------------------------ async
-    # Async variants delegate to the sync ones (all work is in the Rust core,
-    # which releases the GIL on its hot paths), matching InMemorySaver.
+    # The store releases the GIL on its hot paths, so offloading each call to a
+    # worker thread keeps the event loop responsive and lets store work run
+    # concurrently with it (rather than blocking inline).
 
     async def aput(
         self,
@@ -221,7 +251,7 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         metadata: CheckpointMetadata,
         new_versions: ChannelVersions,
     ) -> RunnableConfig:
-        return self.put(config, checkpoint, metadata, new_versions)
+        return await asyncio.to_thread(self.put, config, checkpoint, metadata, new_versions)
 
     async def aput_writes(
         self,
@@ -230,10 +260,10 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        self.put_writes(config, writes, task_id, task_path)
+        await asyncio.to_thread(self.put_writes, config, writes, task_id, task_path)
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
-        return self.get_tuple(config)
+        return await asyncio.to_thread(self.get_tuple, config)
 
     async def alist(
         self,
@@ -243,11 +273,14 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         before: Optional[RunnableConfig] = None,
         limit: Optional[int] = None,
     ) -> AsyncIterator[CheckpointTuple]:
-        for item in self.list(config, filter=filter, before=before, limit=limit):
+        items = await asyncio.to_thread(
+            lambda: list(self.list(config, filter=filter, before=before, limit=limit))
+        )
+        for item in items:
             yield item
 
     async def adelete_thread(self, thread_id: str) -> None:
-        self.delete_thread(thread_id)
+        await asyncio.to_thread(self.delete_thread, thread_id)
 
     # ---------------------------------------------------------------- helpers
 
@@ -257,6 +290,16 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):
         checkpoint = self.serde.loads_typed(tuple(saved["cp"]))
         metadata = self.serde.loads_typed(tuple(saved["md"]))
         parent_id = saved.get("parent")
+
+        if self.incremental and "channel_values" not in checkpoint:
+            # Reassemble channel_values from the per-(channel, version) blobs.
+            bl_ns = _blobs_ns(thread_id, checkpoint_ns)
+            values = {}
+            for ch, ver in checkpoint.get("channel_versions", {}).items():
+                blob = self.store.get(bl_ns, f"{ch}{_SEP}{ver}")
+                if blob and blob[0] == "v":
+                    values[ch] = self.serde.loads_typed((blob[1], blob[2]))
+            checkpoint["channel_values"] = values
 
         writes_ns = _writes_ns(thread_id, checkpoint_ns, checkpoint_id)
         pending_writes = []

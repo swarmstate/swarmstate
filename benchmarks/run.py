@@ -129,6 +129,52 @@ def bench_snapshot(sizes: list[int], iters: int, warmup: int) -> dict:
     return out
 
 
+def bench_concurrency(thread_counts: list[int], ops: int) -> dict:
+    """Throughput (ops/s) of set+get under N threads: swarmstate Store vs a
+    plain dict guarded by a Lock. The Store releases the GIL on the map op, so
+    work overlaps across threads where the locked dict fully serializes."""
+    import threading
+
+    payload = {"v": 1, "s": "x" * 32}
+    out = {"threads": thread_counts, "store_ops_s": [], "dict_lock_ops_s": []}
+
+    for n in thread_counts:
+        store = ss.Store()
+
+        def store_worker(tid):
+            ns = f"t{tid}"
+            for i in range(ops):
+                store.set(ns, str(i), payload)
+                store.get(ns, str(i))
+
+        threads = [threading.Thread(target=store_worker, args=(t,)) for t in range(n)]
+        t0 = time.perf_counter()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        out["store_ops_s"].append(round(n * ops * 2 / (time.perf_counter() - t0)))
+
+        d: dict = {}
+        lock = threading.Lock()
+
+        def dict_worker(tid):
+            for i in range(ops):
+                with lock:
+                    d[(tid, i)] = payload
+                with lock:
+                    d.get((tid, i))
+
+        threads = [threading.Thread(target=dict_worker, args=(t,)) for t in range(n)]
+        t0 = time.perf_counter()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        out["dict_lock_ops_s"].append(round(n * ops * 2 / (time.perf_counter() - t0)))
+    return out
+
+
 # Validated dark-mode categorical palette (dataviz skill: all checks pass on
 # surface #0d1117 - blue / aqua / orange).
 _COLORS = {"SwarmStateSaver": "#3987e5", "InMemorySaver": "#199e70", "SqliteSaver": "#d95926"}
@@ -225,6 +271,25 @@ def make_charts(results: dict, outdir) -> None:
     fig.tight_layout()
     fig.savefig(outdir / "snapshot_scaling.svg", transparent=True, bbox_inches="tight")
     plt.close(fig)
+
+    # --- Chart 3: concurrency scaling (throughput vs threads) ---
+    conc = results.get("concurrency")
+    if conc:
+        fig, ax = plt.subplots(figsize=(7.2, 3.9))
+        fig.patch.set_alpha(0)
+        ax.plot(conc["threads"], conc["store_ops_s"], "-o", color=_COLORS["SwarmStateSaver"],
+                linewidth=2, markersize=6, label="swarmstate Store (GIL released)")
+        ax.plot(conc["threads"], conc["dict_lock_ops_s"], "-o", color=_COLORS["SqliteSaver"],
+                linewidth=2, markersize=6, label="dict + Lock (pure Python)")
+        ax.set_xlabel("threads", color=_MUTED, fontsize=9)
+        ax.set_ylabel("throughput (set+get ops/s), higher is better", color=_MUTED, fontsize=9)
+        ax.set_title("Concurrency scaling", color=_INK, fontsize=12, pad=12)
+        ax.set_xticks(conc["threads"])
+        ax.legend(frameon=False, fontsize=9, labelcolor=_INK, loc="upper left")
+        _style_axes(ax)
+        fig.tight_layout()
+        fig.savefig(outdir / "concurrency.svg", transparent=True, bbox_inches="tight")
+        plt.close(fig)
     print(f"Wrote charts to {outdir}/")
 
 
@@ -305,6 +370,16 @@ def main() -> None:
         results["snapshot"]["dict_deepcopy_ms"],
     ):
         print(f"{k:>10,} {a:>18.5f} {b:>18.5f}")
+
+    # --- concurrency scaling ---
+    results["concurrency"] = bench_concurrency([1, 2, 4, 8], ops=20000)
+    print(f"\n{'threads':>8} {'Store ops/s':>14} {'dict+lock ops/s':>16}")
+    for t, a, b in zip(
+        results["concurrency"]["threads"],
+        results["concurrency"]["store_ops_s"],
+        results["concurrency"]["dict_lock_ops_s"],
+    ):
+        print(f"{t:>8} {a:>14,} {b:>16,}")
 
     args.outdir.mkdir(parents=True, exist_ok=True)
     (args.outdir / "results.json").write_text(json.dumps(results, indent=2))

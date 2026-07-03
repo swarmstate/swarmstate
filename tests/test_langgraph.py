@@ -86,3 +86,33 @@ def test_delete_thread():
     assert g.get_state(cfg).values  # present
     saver.delete_thread("gone")
     assert g.get_state(cfg).values == {}  # cleared
+
+
+def test_incremental_mode_roundtrip():
+    """incremental=True reassembles channel_values correctly and resumes."""
+    store = ss.Store()
+    g = make_graph(SwarmStateSaver(store, incremental=True))
+    cfg = {"configurable": {"thread_id": "inc"}}
+    g.invoke({"count": 0, "trail": []}, cfg)
+    g.invoke({"count": 0, "trail": []}, cfg)
+    st = g.get_state(cfg)
+    assert st.values["count"] == 2
+    assert st.values["trail"] == ["inc", "inc"]
+
+    # A fresh saver over the same store (incremental) still reads it.
+    g2 = make_graph(SwarmStateSaver(store, incremental=True))
+    assert g2.get_state(cfg).values["count"] == 2
+
+
+def test_async_ainvoke_and_aget_state():
+    import asyncio
+
+    g = make_graph(SwarmStateSaver())
+    cfg = {"configurable": {"thread_id": "async"}}
+
+    async def run():
+        await g.ainvoke({"count": 0, "trail": []}, cfg)
+        snap = await g.aget_state(cfg)
+        return snap.values["count"]
+
+    assert asyncio.run(run()) == 1
