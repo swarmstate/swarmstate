@@ -96,6 +96,33 @@ class PostgresStore:
             ).fetchone()
         return default if row is None else _unpack(row[0])
 
+    def set_many(self, items: list[tuple[str, str, Any]]) -> None:
+        if not items:
+            return
+        rows = [(ns, k, _pack(v)) for ns, k, v in items]
+        with self._lock:
+            self._conn.cursor().executemany(
+                f"INSERT INTO {self.table} (ns, k, v) VALUES (%s, %s, %s) "
+                "ON CONFLICT (ns, k) DO UPDATE SET v = EXCLUDED.v",
+                rows,
+            )
+
+    def get_many(self, pairs: list[tuple[str, str]]) -> list[Any]:
+        if not pairs:
+            return []
+        nss = [p[0] for p in pairs]
+        ks = [p[1] for p in pairs]
+        # unnest two arrays positionally, then join: one round-trip for the batch.
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT t.ns, t.k, t.v FROM {self.table} t "
+                "JOIN unnest(%s::text[], %s::text[]) AS q(ns, k) "
+                "ON t.ns = q.ns AND t.k = q.k",
+                (nss, ks),
+            ).fetchall()
+        found = {(ns, k): v for ns, k, v in rows}
+        return [None if (p := (ns, k)) not in found else _unpack(found[p]) for ns, k in pairs]
+
     def contains(self, namespace: str, key: str) -> bool:
         with self._lock:
             row = self._conn.execute(

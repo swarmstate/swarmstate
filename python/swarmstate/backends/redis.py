@@ -89,6 +89,22 @@ class RedisStore:
         raw = self._r.hget(self._hkey(namespace), key)
         return default if raw is None else _unpack(raw)
 
+    def set_many(self, items: list[tuple[str, str, Any]]) -> None:
+        if not items:
+            return
+        pipe = self._r.pipeline(transaction=False)
+        for ns, k, v in items:
+            pipe.hset(self._hkey(ns), k, _pack(v))
+        pipe.execute()
+
+    def get_many(self, pairs: list[tuple[str, str]]) -> list[Any]:
+        if not pairs:
+            return []
+        pipe = self._r.pipeline(transaction=False)
+        for ns, k in pairs:
+            pipe.hget(self._hkey(ns), k)
+        return [None if raw is None else _unpack(raw) for raw in pipe.execute()]
+
     def contains(self, namespace: str, key: str) -> bool:
         return bool(self._r.hexists(self._hkey(namespace), key))
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-from typing import Any, Optional, TypeVar
+from typing import Any, List, Optional, TypeVar
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -419,6 +419,21 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
 
     # ---------------------------------------------------------------- helpers
 
+    # ``list`` (the LangGraph method) shadows the builtin in this class's method
+    # annotations, so batch helpers spell their list types with ``List``.
+    def _get_many(self, ns: str, keys: Sequence[str]) -> List[Any]:
+        """Batch-read ``keys`` from one namespace, falling back to per-key gets.
+
+        Uses the store's ``get_many`` when available (Rust core and the bundled
+        backends), which is one GIL release / round-trip for the whole batch.
+        Custom stores without it still work via per-key ``get``.
+        """
+        getter = getattr(self.store, "get_many", None)
+        if getter is not None:
+            batched: List[Any] = getter([(ns, k) for k in keys])
+            return batched
+        return [self.store.get(ns, k) for k in keys]
+
     def _build_tuple(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, saved: dict[str, Any]
     ) -> CheckpointTuple:
@@ -429,17 +444,21 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         if self.incremental and "channel_values" not in checkpoint:
             # Reassemble channel_values from the per-(channel, version) blobs.
             bl_ns = _blobs_ns(thread_id, checkpoint_ns)
-            values = {}
-            for ch, ver in checkpoint.get("channel_versions", {}).items():
-                blob = self.store.get(bl_ns, f"{ch}{_SEP}{ver}")
+            versions = list(checkpoint.get("channel_versions", {}).items())
+            blobs = self._get_many(bl_ns, [f"{ch}{_SEP}{ver}" for ch, ver in versions])
+            values: dict[str, Any] = {}
+            for (ch, _ver), blob in zip(versions, blobs):
                 if blob and blob[0] == "v":
                     values[ch] = self.serde.loads_typed((blob[1], blob[2]))
             checkpoint["channel_values"] = values
 
         writes_ns = _writes_ns(thread_id, checkpoint_ns, checkpoint_id)
+        keys = sorted(self.store.keys(writes_ns))
         pending_writes = []
-        for key in sorted(self.store.keys(writes_ns)):
-            task_id, channel, tv, _task_path = self.store.get(writes_ns, key)
+        for saved_write in self._get_many(writes_ns, keys):
+            if saved_write is None:
+                continue
+            task_id, channel, tv, _task_path = saved_write
             pending_writes.append((task_id, channel, self.serde.loads_typed(tuple(tv))))
 
         return CheckpointTuple(

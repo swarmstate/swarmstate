@@ -75,6 +75,18 @@ class Store:
         """Return the value at ``(namespace, key)`` or ``default`` if absent."""
         ...
 
+    def set_many(self, items: list[tuple[str, str, Any]]) -> None:
+        """Store many ``(namespace, key, value)`` triples in one call.
+
+        Encodes under the GIL, then writes with the GIL released, locking each
+        shard once for the whole batch.
+        """
+        ...
+
+    def get_many(self, pairs: list[tuple[str, str]]) -> list[Any]:
+        """Fetch many ``(namespace, key)`` pairs, in order; missing -> ``None``."""
+        ...
+
     def contains(self, namespace: str, key: str) -> bool: ...
     def delete(self, namespace: str, key: str) -> bool:
         """Delete ``(namespace, key)``; return True if a value was removed."""

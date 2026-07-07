@@ -84,6 +84,25 @@ class DiskStore:
             ).fetchone()
         return default if row is None else _unpack(row[0])
 
+    def set_many(self, items: list[tuple[str, str, Any]]) -> None:
+        if not items:
+            return
+        rows = [(ns, k, _pack(v)) for ns, k, v in items]
+        with self._lock:
+            self._conn.executemany("INSERT OR REPLACE INTO kv (ns, k, v) VALUES (?, ?, ?)", rows)
+
+    def get_many(self, pairs: list[tuple[str, str]]) -> list[Any]:
+        # One lock acquisition and one transaction for the whole batch (SQLite is
+        # local, so the win is fewer Python-level round-trips, not network).
+        with self._lock:
+            out = []
+            for ns, k in pairs:
+                row = self._conn.execute(
+                    "SELECT v FROM kv WHERE ns = ? AND k = ?", (ns, k)
+                ).fetchone()
+                out.append(None if row is None else _unpack(row[0]))
+        return out
+
     def contains(self, namespace: str, key: str) -> bool:
         with self._lock:
             row = self._conn.execute(

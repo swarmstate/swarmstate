@@ -47,6 +47,37 @@ jobs:
           name: wheels-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
           path: dist
 
+  wheels-freethreaded:
+    # Free-threaded (no-GIL) CPython does not support the stable ABI, so these
+    # are version-specific cp313t wheels (separate from the abi3 ones above).
+    # The Rust core declares free-threaded support via `m.gil_used(false)`.
+    name: free-threaded wheels (cp313t · ${{ matrix.platform.target }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
+          - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { runner: macos-14, target: aarch64, manylinux: "" }
+          - { runner: windows-latest, target: x64, manylinux: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13t"
+      - name: Build free-threaded wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist --interpreter python3.13t
+          sccache: "true"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-ft-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: dist
+
   sdist:
     name: source distribution
     runs-on: ubuntu-latest
@@ -64,7 +95,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [wheels, sdist]
+    needs: [wheels, wheels-freethreaded, sdist]
     runs-on: ubuntu-latest
     # A dedicated environment lets PyPI scope the trusted publisher.
     environment:

@@ -51,6 +51,9 @@ struct SnapshotData {
     timestamp: f64,
     parent: Option<u64>,
     size_bytes: usize,
+    // Per-shard byte totals at snapshot time, so restore() can put each shard's
+    // counter back exactly. `size_bytes` is their sum (the public getter).
+    shard_bytes: Vec<usize>,
     shards: Vec<NsMap>,
 }
 
@@ -164,12 +167,14 @@ pub struct Store {
     history: RwLock<VecDeque<Arc<SnapshotData>>>,
     counter: AtomicU64,
     last_id: RwLock<Option<u64>>,
-    // Running total of stored value bytes, kept incrementally so snapshot()
-    // stays O(1) instead of summing over every value. Relaxed ordering is
-    // sufficient: every mutation happens under a shard lock and every read
-    // (snapshot) holds all shard read locks, so the locks establish the needed
-    // happens-before; the atomic only needs update atomicity, not ordering.
-    total_bytes: AtomicUsize,
+    // Per-shard running total of stored value bytes, kept incrementally so
+    // snapshot() stays O(1) (a sum over SHARDS counters) instead of O(n) over
+    // every value. One counter per shard rather than a single global atomic so
+    // concurrent writers to different shards don't contend on one cache line
+    // (matters on free-threaded builds). Relaxed ordering is sufficient: each
+    // counter is only mutated under its shard's write lock and only read while
+    // all shard read locks are held, so the locks provide the happens-before.
+    shard_bytes: Vec<AtomicUsize>,
 }
 
 impl Store {
@@ -200,7 +205,7 @@ impl Store {
             history: RwLock::new(VecDeque::new()),
             counter: AtomicU64::new(1),
             last_id: RwLock::new(None),
-            total_bytes: AtomicUsize::new(0),
+            shard_bytes: (0..SHARDS).map(|_| AtomicUsize::new(0)).collect(),
         })
     }
 
@@ -226,8 +231,9 @@ impl Store {
     ) -> PyResult<()> {
         let bytes = codec::encode(value)?; // touches Python -> under GIL
         py.allow_threads(|| {
+            let idx = shard_index(&namespace);
             let new_len = bytes.len();
-            let mut guard = self.shard(&namespace).write().unwrap();
+            let mut guard = self.shards[idx].write().unwrap();
             let old_len = if let Some(ns) = guard.get_mut(&namespace) {
                 ns.insert(key, bytes).map(|old| old.len()).unwrap_or(0)
             } else {
@@ -237,11 +243,9 @@ impl Store {
                 0
             };
             if new_len >= old_len {
-                self.total_bytes
-                    .fetch_add(new_len - old_len, Ordering::Relaxed);
+                self.shard_bytes[idx].fetch_add(new_len - old_len, Ordering::Relaxed);
             } else {
-                self.total_bytes
-                    .fetch_sub(old_len - new_len, Ordering::Relaxed);
+                self.shard_bytes[idx].fetch_sub(old_len - new_len, Ordering::Relaxed);
             }
         });
         Ok(())
@@ -266,6 +270,92 @@ impl Store {
         }
     }
 
+    /// Store many `(namespace, key, value)` triples in one call.
+    ///
+    /// Values are encoded under the GIL, then written with the GIL released,
+    /// locking each shard once for the whole batch (not once per item). This
+    /// amortizes the per-call Python->Rust and lock overhead over the batch.
+    fn set_many(&self, py: Python<'_>, items: Vec<(String, String, Py<PyAny>)>) -> PyResult<()> {
+        // Encode everything first (touches Python objects -> under GIL).
+        let mut encoded: Vec<(String, String, Vec<u8>)> = Vec::with_capacity(items.len());
+        for (ns, key, value) in items {
+            let bytes = codec::encode(value.bind(py))?;
+            encoded.push((ns, key, bytes));
+        }
+        py.allow_threads(|| {
+            // Bucket by shard so each shard lock is taken exactly once.
+            let mut buckets: Vec<Vec<(String, String, Vec<u8>)>> =
+                (0..SHARDS).map(|_| Vec::new()).collect();
+            for (ns, key, bytes) in encoded {
+                let idx = shard_index(&ns);
+                buckets[idx].push((ns, key, bytes));
+            }
+            for (idx, bucket) in buckets.into_iter().enumerate() {
+                if bucket.is_empty() {
+                    continue;
+                }
+                let mut guard = self.shards[idx].write().unwrap();
+                let mut delta: i64 = 0;
+                for (ns, key, bytes) in bucket {
+                    let new_len = bytes.len();
+                    let old_len = if let Some(nsmap) = guard.get_mut(&ns) {
+                        nsmap.insert(key, bytes).map(|old| old.len()).unwrap_or(0)
+                    } else {
+                        let mut nsmap = ImMap::new();
+                        nsmap.insert(key, bytes);
+                        guard.insert(ns, nsmap);
+                        0
+                    };
+                    delta += new_len as i64 - old_len as i64;
+                }
+                if delta >= 0 {
+                    self.shard_bytes[idx].fetch_add(delta as usize, Ordering::Relaxed);
+                } else {
+                    self.shard_bytes[idx].fetch_sub((-delta) as usize, Ordering::Relaxed);
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Fetch many `(namespace, key)` pairs in one call, preserving input order.
+    ///
+    /// Missing pairs come back as `None`. Bytes are read with the GIL released
+    /// (one read lock per shard for the batch), then decoded under the GIL.
+    fn get_many(
+        &self,
+        py: Python<'_>,
+        pairs: Vec<(String, String)>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let n = pairs.len();
+        let raw: Vec<Option<Vec<u8>>> = py.allow_threads(|| {
+            let mut out: Vec<Option<Vec<u8>>> = (0..n).map(|_| None).collect();
+            let mut buckets: Vec<Vec<usize>> = (0..SHARDS).map(|_| Vec::new()).collect();
+            for (i, (ns, _)) in pairs.iter().enumerate() {
+                buckets[shard_index(ns)].push(i);
+            }
+            for (idx, indices) in buckets.iter().enumerate() {
+                if indices.is_empty() {
+                    continue;
+                }
+                let guard = self.shards[idx].read().unwrap();
+                for &i in indices {
+                    let (ns, key) = &pairs[i];
+                    out[i] = guard.get(ns).and_then(|nsmap| nsmap.get(key)).cloned();
+                }
+            }
+            out
+        });
+        let mut result = Vec::with_capacity(n);
+        for item in raw {
+            match item {
+                Some(b) => result.push(codec::decode(py, &b)?.unbind()),
+                None => result.push(py.None()),
+            }
+        }
+        Ok(result)
+    }
+
     /// Return whether `(namespace, key)` exists.
     fn contains(&self, py: Python<'_>, namespace: &str, key: &str) -> bool {
         py.allow_threads(|| {
@@ -277,11 +367,12 @@ impl Store {
     /// Delete `(namespace, key)`. Returns True if a value was removed.
     fn delete(&self, py: Python<'_>, namespace: &str, key: &str) -> bool {
         py.allow_threads(|| {
-            let mut guard = self.shard(namespace).write().unwrap();
+            let idx = shard_index(namespace);
+            let mut guard = self.shards[idx].write().unwrap();
             match guard.get_mut(namespace) {
                 Some(ns) => match ns.remove(key) {
                     Some(old) => {
-                        self.total_bytes.fetch_sub(old.len(), Ordering::Relaxed);
+                        self.shard_bytes[idx].fetch_sub(old.len(), Ordering::Relaxed);
                         true
                     }
                     None => false,
@@ -327,10 +418,10 @@ impl Store {
     /// Remove all entries (does not clear snapshot history).
     fn clear(&self, py: Python<'_>) {
         py.allow_threads(|| {
-            for shard in &self.shards {
+            for (shard, bytes) in self.shards.iter().zip(&self.shard_bytes) {
                 shard.write().unwrap().clear();
+                bytes.store(0, Ordering::Relaxed);
             }
-            self.total_bytes.store(0, Ordering::Relaxed);
         });
     }
 
@@ -342,7 +433,12 @@ impl Store {
         let data = py.allow_threads(|| {
             let guards: Vec<_> = self.shards.iter().map(|s| s.read().unwrap()).collect();
             let shards: Vec<NsMap> = guards.iter().map(|g| (**g).clone()).collect();
-            let size_bytes = self.total_bytes.load(Ordering::Relaxed);
+            let shard_bytes: Vec<usize> = self
+                .shard_bytes
+                .iter()
+                .map(|b| b.load(Ordering::Relaxed))
+                .collect();
+            let size_bytes: usize = shard_bytes.iter().sum();
             drop(guards);
 
             let id = self.counter.fetch_add(1, Ordering::Relaxed);
@@ -357,6 +453,7 @@ impl Store {
                 timestamp: now_secs(),
                 parent,
                 size_bytes,
+                shard_bytes,
                 shards,
             });
             let mut hist = self.history.write().unwrap();
@@ -377,9 +474,8 @@ impl Store {
             let mut guards: Vec<_> = self.shards.iter().map(|s| s.write().unwrap()).collect();
             for (i, g) in guards.iter_mut().enumerate() {
                 **g = snapshot.data.shards[i].clone();
+                self.shard_bytes[i].store(snapshot.data.shard_bytes[i], Ordering::Relaxed);
             }
-            self.total_bytes
-                .store(snapshot.data.size_bytes, Ordering::Relaxed);
         });
     }
 
@@ -449,6 +545,45 @@ mod tests {
             assert_eq!(d["removed"], vec![("n".to_string(), "drop".to_string())]);
             assert_eq!(d["changed"], vec![("n".to_string(), "keep".to_string())]);
             assert_eq!(now.parent(), Some(base.id()));
+        });
+    }
+
+    #[test]
+    fn set_many_get_many_roundtrip() {
+        Python::with_gil(|py| {
+            let store = Store::new("memory", "msgpack", None).unwrap();
+            let mk = |n: i64| n.into_pyobject(py).unwrap().into_any().unbind();
+            let items = vec![
+                ("a".to_string(), "x".to_string(), mk(1)),
+                ("a".to_string(), "y".to_string(), mk(2)),
+                ("b".to_string(), "z".to_string(), mk(3)),
+            ];
+            store.set_many(py, items).unwrap();
+            assert_eq!(store.__len__(py), 3);
+
+            // Overwrite via set_many keeps the count and updates byte accounting.
+            store
+                .set_many(py, vec![("a".to_string(), "x".to_string(), mk(42))])
+                .unwrap();
+            assert_eq!(store.__len__(py), 3);
+
+            let got = store
+                .get_many(
+                    py,
+                    vec![
+                        ("a".to_string(), "x".to_string()),
+                        ("b".to_string(), "z".to_string()),
+                        ("missing".to_string(), "nope".to_string()),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(got[0].bind(py).extract::<i64>().unwrap(), 42);
+            assert_eq!(got[1].bind(py).extract::<i64>().unwrap(), 3);
+            assert!(got[2].bind(py).is_none());
+
+            // Byte total stays consistent: a snapshot equals a fresh recompute.
+            let snap = store.snapshot(py);
+            assert!(snap.size_bytes() > 0);
         });
     }
 

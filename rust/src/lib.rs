@@ -41,6 +41,11 @@ fn loads<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyAny>> {
 /// The `swarmstate._core` native module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Declare the extension safe on free-threaded (no-GIL) CPython: all shared
+    // state lives behind RwLocks/atomics in the Rust core, and PyO3's per-object
+    // borrow checking guards the &mut self methods. Without this, importing on a
+    // free-threaded interpreter would force the GIL back on.
+    m.gil_used(false)?;
     m.add("__version__", CORE_VERSION)?;
     m.add_function(wrap_pyfunction!(core_version, m)?)?;
     m.add_function(wrap_pyfunction!(dumps, m)?)?;
