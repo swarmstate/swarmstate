@@ -322,11 +322,7 @@ impl Store {
     ///
     /// Missing pairs come back as `None`. Bytes are read with the GIL released
     /// (one read lock per shard for the batch), then decoded under the GIL.
-    fn get_many(
-        &self,
-        py: Python<'_>,
-        pairs: Vec<(String, String)>,
-    ) -> PyResult<Vec<Py<PyAny>>> {
+    fn get_many(&self, py: Python<'_>, pairs: Vec<(String, String)>) -> PyResult<Vec<Py<PyAny>>> {
         let n = pairs.len();
         let raw: Vec<Option<Vec<u8>>> = py.allow_threads(|| {
             let mut out: Vec<Option<Vec<u8>>> = (0..n).map(|_| None).collect();
