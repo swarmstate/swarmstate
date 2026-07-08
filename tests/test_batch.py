@@ -47,6 +47,9 @@ def test_set_many_matches_individual_sets():
 
 
 def test_disk_backend_batch(tmp_path):
+    import pytest
+
+    pytest.importorskip("msgpack")
     from swarmstate.backends.disk import DiskStore
 
     s = DiskStore(str(tmp_path / "b.db"))

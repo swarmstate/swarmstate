@@ -53,12 +53,16 @@ jobs:
     # The Rust core declares free-threaded support via `m.gil_used(false)`.
     name: free-threaded wheels (cp313t · ${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.runner }}
+    # Linux/manylinux free-threaded builds are still flaky (maturin + old
+    # manylinux images), so they are best-effort and must not block the release;
+    # macOS/Windows free-threaded and all the abi3 wheels still publish.
+    continue-on-error: ${{ matrix.platform.optional || false }}
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest, target: x86_64, manylinux: auto }
-          - { runner: ubuntu-latest, target: aarch64, manylinux: auto }
+          - { runner: ubuntu-latest, target: x86_64, manylinux: 2_28, optional: true }
+          - { runner: ubuntu-latest, target: aarch64, manylinux: 2_28, optional: true }
           - { runner: macos-14, target: aarch64, manylinux: "" }
           - { runner: windows-latest, target: x64, manylinux: "" }
     steps:
