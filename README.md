@@ -104,12 +104,15 @@ Early development.
   ops (`put` / `put_writes` / `get_tuple`): an in-memory sink, an OpenTelemetry metrics
   sink, and per-op spans (`swarmstate[otel]`). Zero overhead when unused. Strict `mypy` in CI.
 - **Free-threaded (no-GIL) ready** ✅ - the Rust core declares free-threaded support, so on
-  a free-threaded CPython build (`cp313t`) the sharded store scales across cores: **~1.9M
-  set+get ops/s at 8 threads vs ~196k on GIL Python** (~9.8x), where the GIL build gets
-  *slower* with more threads. Version-specific `cp313t` wheels ship alongside the abi3 ones.
+  a free-threaded CPython build (`cp313t`) the store **doesn't collapse under threads the way
+  the GIL build does**: on a set+get workload at 8 threads it sustains **~1.8M ops/s vs ~130k
+  on GIL Python (over 10x)**, where the GIL build gets *much slower* as threads are added.
+  (These workloads are allocation-bound, so neither scales linearly with cores; the win is
+  avoiding the GIL's collapse.) Version-specific `cp313t` wheels ship alongside the abi3 ones.
 - **Batch API** ✅ - `Store.set_many` / `get_many` (and on every backend) amortize the
   per-call overhead over a batch: one GIL release for the in-memory core, one round-trip for
-  networked backends. On free-threaded, `set_many` is ~4x the throughput of individual sets.
+  networked backends. On free-threaded at 8 threads, `set_many` is ~3x the throughput of
+  individual sets.
 
 ## Examples
 
