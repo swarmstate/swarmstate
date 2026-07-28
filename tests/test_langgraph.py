@@ -116,3 +116,101 @@ def test_async_ainvoke_and_aget_state():
         return snap.values["count"]
 
     assert asyncio.run(run()) == 1
+
+
+class _CountingStore:
+    """Wraps a real Store, counting set vs set_many calls to prove batching."""
+
+    def __init__(self):
+        self._inner = ss.Store()
+        self.set_calls = 0
+        self.set_many_calls = 0
+
+    def set_many(self, items):
+        self.set_many_calls += 1
+        self._inner.set_many(items)
+
+    def set(self, ns, key, value):
+        self.set_calls += 1
+        self._inner.set(ns, key, value)
+
+    def __getattr__(self, name):
+        # Delegate everything else (get, get_many, contains, keys, ...).
+        return getattr(self._inner, name)
+
+
+def test_put_writes_batches_via_set_many():
+    """Multiple pending writes flush in a single set_many, and round-trip."""
+    store = _CountingStore()
+    saver = SwarmStateSaver(store)
+    cfg = {
+        "configurable": {
+            "thread_id": "w",
+            "checkpoint_ns": "",
+            "checkpoint_id": "cp-1",
+        }
+    }
+    writes = [("a", 1), ("b", 2), ("c", 3)]
+    saver.put_writes(cfg, writes, task_id="task-1")
+
+    # One batched call for three writes — not one set() per write.
+    assert store.set_many_calls == 1
+    assert store.set_calls == 0
+
+    # The writes are readable back through the normal namespace/key layout.
+    from swarmstate.integrations.langgraph import _writes_ns
+
+    ns = _writes_ns("w", "", "cp-1")
+    assert len(store.keys(ns)) == 3
+
+
+def test_put_writes_idempotent_positional_retry():
+    """A retry of the same positional writes stores nothing new."""
+    store = _CountingStore()
+    saver = SwarmStateSaver(store)
+    cfg = {
+        "configurable": {
+            "thread_id": "w2",
+            "checkpoint_ns": "",
+            "checkpoint_id": "cp-1",
+        }
+    }
+    writes = [("a", 1), ("b", 2)]
+    saver.put_writes(cfg, writes, task_id="task-1")
+    from swarmstate.integrations.langgraph import _writes_ns
+
+    ns = _writes_ns("w2", "", "cp-1")
+    assert len(store.keys(ns)) == 2
+
+    # Replaying the identical writes is a no-op (write-once positional keys):
+    # every item is filtered out, so no empty batch is flushed either.
+    before = store.set_many_calls
+    saver.put_writes(cfg, writes, task_id="task-1")
+    assert len(store.keys(ns)) == 2
+    assert store.set_many_calls == before  # empty batch → no call
+
+
+def test_put_writes_fallback_without_set_many():
+    """A custom store lacking set_many still works via per-item set."""
+
+    class NoBatchStore:
+        def __init__(self):
+            self._inner = ss.Store()
+
+        def __getattr__(self, name):
+            if name == "set_many" or name == "get_many":
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    saver = SwarmStateSaver(NoBatchStore())
+    cfg = {
+        "configurable": {
+            "thread_id": "w3",
+            "checkpoint_ns": "",
+            "checkpoint_id": "cp-1",
+        }
+    }
+    saver.put_writes(cfg, [("a", 1), ("b", 2)], task_id="task-1")
+    from swarmstate.integrations.langgraph import _writes_ns
+
+    assert len(saver.store.keys(_writes_ns("w3", "", "cp-1"))) == 2

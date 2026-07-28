@@ -202,15 +202,18 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
             cp_to_store = {**checkpoint}
             values = cp_to_store.pop("channel_values", {})
             bl_ns = _blobs_ns(thread_id, checkpoint_ns)
+            # Same namespace for every blob → collect and flush in one set_many.
+            blob_batch = []
             for ch, ver in new_versions.items():
                 bkey = f"{ch}{_SEP}{ver}"
                 if self.store.contains(bl_ns, bkey):
                     continue  # this exact value/version is already stored
                 if ch in values:
                     vt, vb = self.serde.dumps_typed(values[ch])
-                    self.store.set(bl_ns, bkey, ["v", vt, vb])
+                    blob_batch.append((bl_ns, bkey, ["v", vt, vb]))
                 else:
-                    self.store.set(bl_ns, bkey, ["empty"])
+                    blob_batch.append((bl_ns, bkey, ["empty"]))
+            self._set_many(blob_batch)
 
         cp_type, cp_bytes = self.serde.dumps_typed(cp_to_store)
         md_type, md_bytes = self.serde.dumps_typed(get_checkpoint_metadata(config, metadata))
@@ -272,6 +275,12 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         checkpoint_id = cfg["checkpoint_id"]
         ns = _writes_ns(thread_id, checkpoint_ns, checkpoint_id)
 
+        # All writes land in the same namespace (one shard), so collect them and
+        # flush with a single set_many: one lock acquisition / GIL release for
+        # the whole batch instead of one per write (matters on fan-out steps that
+        # emit many writes). Idempotency is preserved — the contains() checks run
+        # first and only the writes that actually go through are batched.
+        batch = []
         for idx, (channel, value) in enumerate(writes):
             widx = WRITES_IDX_MAP.get(channel, idx)
             key = f"{task_id}{_SEP}{widx}"
@@ -280,7 +289,8 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
             if widx >= 0 and self.store.contains(ns, key):
                 continue
             v_type, v_bytes = self.serde.dumps_typed(value)
-            self.store.set(ns, key, [task_id, channel, [v_type, v_bytes], task_path])
+            batch.append((ns, key, [task_id, channel, [v_type, v_bytes], task_path]))
+        self._set_many(batch)
 
     def get_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         if self._metrics is None and self._tracer is None:
@@ -433,6 +443,23 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
             batched: List[Any] = getter([(ns, k) for k in keys])
             return batched
         return [self.store.get(ns, k) for k in keys]
+
+    def _set_many(self, items: Sequence[tuple[str, str, Any]]) -> None:
+        """Batch-write ``(namespace, key, value)`` triples in one call.
+
+        Uses the store's ``set_many`` when available (Rust core and the bundled
+        backends): one lock acquisition per shard and one GIL release for the
+        whole batch, instead of one per item. Custom stores without it still
+        work via per-item ``set``.
+        """
+        if not items:
+            return
+        setter = getattr(self.store, "set_many", None)
+        if setter is not None:
+            setter(list(items))
+        else:
+            for ns, key, value in items:
+                self.store.set(ns, key, value)
 
     def _build_tuple(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str, saved: dict[str, Any]

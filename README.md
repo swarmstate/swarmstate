@@ -112,7 +112,9 @@ Early development.
 - **Batch API** ✅ - `Store.set_many` / `get_many` (and on every backend) amortize the
   per-call overhead over a batch: one GIL release for the in-memory core, one round-trip for
   networked backends. On free-threaded at 8 threads, `set_many` is ~3x the throughput of
-  individual sets.
+  individual sets. `SwarmStateSaver` uses it internally: `put_writes` (and the `incremental`
+  channel blobs) flush all writes of a step in a single `set_many`, so fan-out steps that emit
+  many pending writes pay one lock/round-trip instead of one per write.
 
 ## Examples
 
