@@ -53,18 +53,25 @@ jobs:
     # The Rust core declares free-threaded support via `m.gil_used(false)`.
     name: free-threaded wheels (cp313t · ${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.runner }}
-    # Linux/manylinux free-threaded builds are still flaky (maturin + old
-    # manylinux images), so they are best-effort and must not block the release;
-    # macOS/Windows free-threaded and all the abi3 wheels still publish.
+    # The stable ABI (abi3) is incompatible with free-threaded interpreters
+    # before 3.14, so free-threaded wheels must be version-specific (cp313t).
+    # Host builds (macOS/Windows) auto-drop abi3, but the cross-compiled
+    # manylinux path does not — it needs `--no-default-features` to turn off the
+    # crate's `abi3` feature (see Cargo.toml). The Linux entries stay
+    # non-blocking as a safety net until proven green in a release; macOS/Windows
+    # free-threaded and all the abi3 wheels always publish regardless.
     continue-on-error: ${{ matrix.platform.optional || false }}
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - { runner: ubuntu-latest, target: x86_64, manylinux: 2_28, optional: true }
-          - { runner: ubuntu-latest, target: aarch64, manylinux: 2_28, optional: true }
-          - { runner: macos-14, target: aarch64, manylinux: "" }
-          - { runner: windows-latest, target: x64, manylinux: "" }
+          # Linux cross-builds abi3 by default, which is incompatible with
+          # free-threaded < 3.14 — drop it with --no-default-features. Host
+          # builds (macOS/Windows) auto-drop abi3, so they need no extra flag.
+          - { runner: ubuntu-latest, target: x86_64, manylinux: 2_28, optional: true, extra_args: "--no-default-features" }
+          - { runner: ubuntu-latest, target: aarch64, manylinux: 2_28, optional: true, extra_args: "--no-default-features" }
+          - { runner: macos-14, target: aarch64, manylinux: "", extra_args: "" }
+          - { runner: windows-latest, target: x64, manylinux: "", extra_args: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,7 +82,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist --interpreter python3.13t
+          args: --release --out dist --interpreter python3.13t ${{ matrix.platform.extra_args }}
           sccache: "true"
       - uses: actions/upload-artifact@v4
         with:

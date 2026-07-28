@@ -1,6 +1,6 @@
 [package]
 name = "swarmstate_core"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2021"
 description = "Rust core for swarmstate: state & checkpointing backend for multi-agent systems"
 license = "MIT"
@@ -13,8 +13,18 @@ name = "_core"
 path = "rust/src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# abi3 (stable ABI, one wheel for Python 3.9+) is the default for normal builds.
+# It is intentionally toggleable because the stable ABI is incompatible with
+# free-threaded interpreters before 3.14: the cross-compiled manylinux
+# free-threaded wheels build with `--no-default-features` to drop it and produce
+# a version-specific cp313t wheel instead. Host builds (maturin develop / pip
+# install) auto-disable abi3 for free-threaded, so they need no flag.
+default = ["abi3"]
+abi3 = ["pyo3/abi3-py39"]
+
 [dependencies]
-pyo3 = { version = "0.23", features = ["abi3-py39"] }
+pyo3 = { version = "0.23" }
 rmpv = "1.3"          # msgpack Value model — stable, language-agnostic codec
 im = "15.1"           # persistent/immutable maps — O(1) structural-sharing snapshots
 
