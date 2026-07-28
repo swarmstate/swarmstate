@@ -108,7 +108,8 @@ Early development.
   the GIL build does**: on a set+get workload at 8 threads it sustains **~1.8M ops/s vs ~130k
   on GIL Python (over 10x)**, where the GIL build gets *much slower* as threads are added.
   (These workloads are allocation-bound, so neither scales linearly with cores; the win is
-  avoiding the GIL's collapse.) Version-specific `cp313t` wheels ship alongside the abi3 ones.
+  avoiding the GIL's collapse.) Version-specific `cp313t` wheels ship for Linux
+  (x86_64/aarch64), macOS (arm64) and Windows (x64) alongside the abi3 ones.
 - **Batch API** ✅ - `Store.set_many` / `get_many` (and on every backend) amortize the
   per-call overhead over a batch: one GIL release for the in-memory core, one round-trip for
   networked backends. On free-threaded at 8 threads, `set_many` is ~3x the throughput of

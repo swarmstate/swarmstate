@@ -51,27 +51,17 @@ jobs:
     # Free-threaded (no-GIL) CPython does not support the stable ABI, so these
     # are version-specific cp313t wheels (separate from the abi3 ones above).
     # The Rust core declares free-threaded support via `m.gil_used(false)`.
+    # macOS/Windows build on the host (setup-python provides a real cp313t) and
+    # maturin auto-drops abi3 for free-threaded. Linux is handled separately
+    # (wheels-freethreaded-linux) because the manylinux image has no cp313t.
     name: free-threaded wheels (cp313t · ${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.runner }}
-    # The stable ABI (abi3) is incompatible with free-threaded interpreters
-    # before 3.14, so free-threaded wheels must be version-specific (cp313t).
-    # Host builds (macOS/Windows) auto-drop abi3, but the cross-compiled
-    # manylinux path does not — it needs `--no-default-features` to turn off the
-    # crate's `abi3` feature (see Cargo.toml). The Linux entries stay
-    # non-blocking as a safety net until proven green in a release; macOS/Windows
-    # free-threaded and all the abi3 wheels always publish regardless.
-    continue-on-error: ${{ matrix.platform.optional || false }}
     strategy:
       fail-fast: false
       matrix:
         platform:
-          # Linux cross-builds abi3 by default, which is incompatible with
-          # free-threaded < 3.14 — drop it with --no-default-features. Host
-          # builds (macOS/Windows) auto-drop abi3, so they need no extra flag.
-          - { runner: ubuntu-latest, target: x86_64, manylinux: 2_28, optional: true, extra_args: "--no-default-features" }
-          - { runner: ubuntu-latest, target: aarch64, manylinux: 2_28, optional: true, extra_args: "--no-default-features" }
-          - { runner: macos-14, target: aarch64, manylinux: "", extra_args: "" }
-          - { runner: windows-latest, target: x64, manylinux: "", extra_args: "" }
+          - { runner: macos-14, target: aarch64 }
+          - { runner: windows-latest, target: x64 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -81,12 +71,48 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          manylinux: ${{ matrix.platform.manylinux }}
-          args: --release --out dist --interpreter python3.13t ${{ matrix.platform.extra_args }}
+          args: --release --out dist --interpreter python3.13t
           sccache: "true"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-ft-${{ matrix.platform.runner }}-${{ matrix.platform.target }}
+          path: dist
+
+  wheels-freethreaded-linux:
+    # The manylinux_2_28 image ships free-threaded interpreters only for 3.14t+,
+    # not cp313t, so the in-container maturin build fails with "Free-threaded
+    # Python interpreter is only supported on 3.14 and later". Instead build
+    # natively on the host (setup-python's 3.13t is a real free-threaded
+    # interpreter) with abi3 disabled (--no-default-features → drops the crate's
+    # `abi3` feature), then repair to a manylinux tag with auditwheel. Runs on a
+    # native arm64 runner for aarch64 (no cross-compile needed).
+    name: free-threaded wheels (cp313t · linux ${{ matrix.plat.target }})
+    runs-on: ${{ matrix.plat.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        plat:
+          - { runner: ubuntu-24.04, target: x86_64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13t"
+      - name: Build (native) + auditwheel repair
+        run: |
+          python -m pip install --upgrade pip "maturin>=1.7,<2.0" auditwheel
+          maturin build --release --out dist_raw --interpreter python3.13t --no-default-features
+          auditwheel repair dist_raw/*.whl -w dist
+          ls -la dist
+      - name: Smoke-test the repaired wheel
+        run: |
+          python -m pip install dist/*.whl
+          python -c "import sys, swarmstate as ss; assert sys._is_gil_enabled() is False; s=ss.Store(); s.set('n','k',{'v':1}); assert s.get('n','k')=={'v':1}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-ft-linux-${{ matrix.plat.target }}
           path: dist
 
   sdist:
@@ -106,7 +132,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [wheels, wheels-freethreaded, sdist]
+    needs: [wheels, wheels-freethreaded, wheels-freethreaded-linux, sdist]
     runs-on: ubuntu-latest
     # A dedicated environment lets PyPI scope the trusted publisher.
     environment:
