@@ -45,6 +45,33 @@ def test_shares_the_same_store_as_other_agents():
     assert "12x" in store.get("crew:research", key)["value"]
 
 
+def test_deleting_an_entry_does_not_overwrite_another_on_the_next_save():
+    """Keys used to come from the entry *count*, so a deletion caused a clash."""
+    mem = SwarmStateStorage(namespace="crew")
+    mem.save("first")
+    mem.save("second")
+    mem.store.delete("crew", sorted(mem.store.keys("crew"))[0])
+
+    mem.save("third")
+    kept = {mem.store.get("crew", k)["value"] for k in mem.store.keys("crew")}
+    assert kept == {"second", "third"}
+
+
+def test_concurrent_saves_keep_every_entry():
+    import threading
+
+    mem = SwarmStateStorage(namespace="crew")
+    threads = [
+        threading.Thread(target=lambda i=i: [mem.save(f"item {i}-{j}") for j in range(20)])
+        for i in range(4)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(mem) == 80
+
+
 def test_dict_value_is_indexed():
     mem = SwarmStateStorage()
     mem.save({"topic": "billing", "note": "duplicate charge"})

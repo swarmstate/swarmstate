@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rmpv::Value;
 
 use crate::codec;
@@ -27,6 +28,59 @@ pub struct HandoffGraph {
     adj: HashMap<String, Vec<Edge>>,
     nodes: HashSet<String>,
     on_cycle: String,
+    // The state paths the outgoing conditions of each node read, so route() can
+    // materialize just those instead of converting the entire routing state.
+    node_paths: HashMap<String, Vec<Vec<String>>>,
+}
+
+/// Drop paths already covered by a shorter one (`a.b` under `a`).
+///
+/// Materializing both would put the same key in the partial state twice.
+fn drop_covered_paths(paths: &mut Vec<Vec<String>>) {
+    paths.sort_by_key(Vec::len);
+    let mut kept: Vec<Vec<String>> = Vec::with_capacity(paths.len());
+    for path in paths.drain(..) {
+        if !kept.iter().any(|k| path.starts_with(k)) {
+            kept.push(path);
+        }
+    }
+    *paths = kept;
+}
+
+/// Walk `state` down `path`, returning the value there if every step is a dict.
+fn resolve_path<'py>(
+    state: &Bound<'py, PyDict>,
+    path: &[String],
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let mut current: Bound<'py, PyAny> = state.clone().into_any();
+    for segment in path {
+        let Ok(dict) = current.cast::<PyDict>() else {
+            return Ok(None);
+        };
+        match dict.get_item(segment.as_str())? {
+            Some(value) => current = value,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(current))
+}
+
+/// Insert `leaf` into a nested map skeleton at `path`, as the evaluator expects.
+fn insert_path(pairs: &mut Vec<(Value, Value)>, path: &[String], leaf: Value) {
+    let key = Value::String(path[0].clone().into());
+    if path.len() == 1 {
+        pairs.push((key, leaf));
+        return;
+    }
+    if let Some((_, existing)) = pairs.iter_mut().find(|(k, _)| *k == key) {
+        if let Value::Map(inner) = existing {
+            insert_path(inner, &path[1..], leaf);
+        }
+        return;
+    }
+    let mut inner = Vec::new();
+    insert_path(&mut inner, &path[1..], leaf);
+    pairs.push((key, Value::Map(inner)));
 }
 
 impl HandoffGraph {
@@ -36,39 +90,50 @@ impl HandoffGraph {
         if from == to {
             return true;
         }
-        let mut stack = vec![to.to_string()];
-        let mut seen = HashSet::new();
+        // Borrowed node names: the traversal allocates nothing.
+        let mut stack: Vec<&str> = vec![to];
+        let mut seen: HashSet<&str> = HashSet::new();
         while let Some(n) = stack.pop() {
             if n == from {
                 return true;
             }
-            if !seen.insert(n.clone()) {
+            if !seen.insert(n) {
                 continue;
             }
-            if let Some(edges) = self.adj.get(&n) {
+            if let Some(edges) = self.adj.get(n) {
                 for e in edges {
-                    stack.push(e.to.clone());
+                    stack.push(e.to.as_str());
                 }
             }
         }
         false
     }
 
-    fn reaches(&self, start: &str, target: &str, seen: &mut HashSet<String>) -> bool {
-        if start == target {
-            return true;
-        }
-        if !seen.insert(start.to_string()) {
-            return false;
-        }
-        if let Some(edges) = self.adj.get(start) {
-            for e in edges {
-                if self.reaches(&e.to, target, seen) {
-                    return true;
+    /// Recompute the paths the outgoing conditions of `node` read.
+    fn refresh_paths(&mut self, node: &str) {
+        let mut paths = Vec::new();
+        if let Some(edges) = self.adj.get(node) {
+            for edge in edges {
+                if let Some(cond) = &edge.cond {
+                    condition::collect_paths(cond, &mut paths);
                 }
             }
         }
-        false
+        drop_covered_paths(&mut paths);
+        self.node_paths.insert(node.to_string(), paths);
+    }
+
+    /// Build a routing state holding only the paths the conditions of `node` read.
+    fn partial_state(&self, node: &str, state: &Bound<'_, PyDict>) -> PyResult<Value> {
+        let mut pairs = Vec::new();
+        if let Some(paths) = self.node_paths.get(node) {
+            for path in paths {
+                if let Some(value) = resolve_path(state, path)? {
+                    insert_path(&mut pairs, path, codec::py_to_value(&value)?);
+                }
+            }
+        }
+        Ok(Value::Map(pairs))
     }
 }
 
@@ -84,6 +149,7 @@ impl HandoffGraph {
             adj: HashMap::new(),
             nodes: HashSet::new(),
             on_cycle: on_cycle.to_string(),
+            node_paths: HashMap::new(),
         })
     }
 
@@ -121,11 +187,12 @@ impl HandoffGraph {
 
         self.nodes.insert(from_node.clone());
         self.nodes.insert(to.clone());
-        self.adj.entry(from_node).or_default().push(Edge {
+        self.adj.entry(from_node.clone()).or_default().push(Edge {
             to,
             when_src: when.map(str::to_string),
             cond,
         });
+        self.refresh_paths(&from_node);
         Ok(())
     }
 
@@ -141,11 +208,19 @@ impl HandoffGraph {
         node: &str,
         state: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<String>> {
+        // Converting the whole state was the dominant cost of routing: a realistic
+        // LangGraph state (a few hundred messages) took ~165µs to encode, all of it
+        // to read one field. Pull just the paths the conditions name instead.
         let state_val = match state {
-            Some(obj) => codec::py_to_value(obj)?,
             None => Value::Map(Vec::new()),
+            Some(obj) => match obj.cast::<PyDict>() {
+                Ok(dict) => self.partial_state(node, dict)?,
+                // Not a mapping: no paths can resolve, but keep converting it so
+                // an unsupported state type still reports the same error.
+                Err(_) => codec::py_to_value(obj)?,
+            },
         };
-        let result = py.allow_threads(|| {
+        let result = py.detach(|| {
             let edges = self.adj.get(node)?;
             for e in edges {
                 let matched = match &e.cond {
@@ -187,20 +262,40 @@ impl HandoffGraph {
     }
 
     /// Whether the graph is currently acyclic.
+    ///
+    /// Kahn's algorithm: O(V+E) and iterative. The previous reachability search
+    /// per edge was O(V·E) — half a second on a 3000-node chain — and recursed
+    /// once per node, so a deep graph could overflow the stack.
     fn is_dag(&self) -> bool {
-        let nodes: Vec<String> = self.nodes.iter().cloned().collect();
-        for n in &nodes {
-            if let Some(edges) = self.adj.get(n) {
+        let mut indegree: HashMap<&str, usize> =
+            self.nodes.iter().map(|n| (n.as_str(), 0usize)).collect();
+        for edges in self.adj.values() {
+            for e in edges {
+                *indegree.entry(e.to.as_str()).or_insert(0) += 1;
+            }
+        }
+        let mut ready: Vec<&str> = indegree
+            .iter()
+            .filter(|(_, d)| **d == 0)
+            .map(|(n, _)| *n)
+            .collect();
+
+        let mut settled = 0usize;
+        while let Some(node) = ready.pop() {
+            settled += 1;
+            if let Some(edges) = self.adj.get(node) {
                 for e in edges {
-                    let mut seen = HashSet::new();
-                    // A cycle exists if a successor can reach n.
-                    if self.reaches(&e.to, n, &mut seen) {
-                        return false;
+                    if let Some(d) = indegree.get_mut(e.to.as_str()) {
+                        *d -= 1;
+                        if *d == 0 {
+                            ready.push(e.to.as_str());
+                        }
                     }
                 }
             }
         }
-        true
+        // Anything left has an unbroken incoming edge: it sits on a cycle.
+        settled == indegree.len()
     }
 
     fn __len__(&self) -> usize {
@@ -236,7 +331,7 @@ mod tests {
 
     #[test]
     fn deterministic_first_match() {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let mut g = HandoffGraph::new("error").unwrap();
             g.add_edge(
                 "triage".into(),
@@ -275,7 +370,7 @@ mod tests {
 
     #[test]
     fn no_match_returns_none() {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let mut g = HandoffGraph::new("error").unwrap();
             g.add_edge("a".into(), "b".into(), Some("x == 1")).unwrap();
             let st = dict(py, &[]);
@@ -294,6 +389,54 @@ mod tests {
         // self-loop.
         assert!(g.add_edge("a".into(), "a".into(), None).is_err());
         assert!(g.is_dag());
+    }
+
+    #[test]
+    fn detects_a_cycle_that_excludes_some_nodes() {
+        let mut g = HandoffGraph::new("allow").unwrap();
+        g.add_edge("a".into(), "b".into(), None).unwrap();
+        g.add_edge("b".into(), "c".into(), None).unwrap();
+        g.add_edge("c".into(), "b".into(), None).unwrap(); // b <-> c cycle
+        g.add_node("lonely".into());
+        assert!(!g.is_dag());
+    }
+
+    #[test]
+    fn is_dag_handles_diamonds_and_multi_edges() {
+        let mut g = HandoffGraph::new("allow").unwrap();
+        g.add_edge("a".into(), "b".into(), None).unwrap();
+        g.add_edge("a".into(), "c".into(), None).unwrap();
+        g.add_edge("b".into(), "d".into(), None).unwrap();
+        g.add_edge("c".into(), "d".into(), None).unwrap();
+        g.add_edge("a".into(), "b".into(), None).unwrap(); // duplicate edge
+        assert!(g.is_dag());
+    }
+
+    #[test]
+    fn only_the_referenced_paths_are_read() {
+        Python::attach(|py| {
+            let mut g = HandoffGraph::new("error").unwrap();
+            g.add_edge("s".into(), "deep".into(), Some("data.user.role == 'admin'"))
+                .unwrap();
+            g.add_edge("s".into(), "shallow".into(), Some("data == 'plain'"))
+                .unwrap();
+
+            // Overlapping paths: `data` covers `data.user.role`, so the partial
+            // state must not carry the same key twice.
+            let paths = g.node_paths.get("s").unwrap();
+            assert_eq!(paths, &vec![vec!["data".to_string()]]);
+
+            let state = pyo3::types::PyDict::new(py);
+            let data = pyo3::types::PyDict::new(py);
+            let user = pyo3::types::PyDict::new(py);
+            user.set_item("role", "admin").unwrap();
+            data.set_item("user", &user).unwrap();
+            state.set_item("data", &data).unwrap();
+            assert_eq!(
+                g.route(py, "s", Some(state.as_any())).unwrap(),
+                Some("deep".to_string())
+            );
+        });
     }
 
     #[test]

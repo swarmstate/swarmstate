@@ -24,13 +24,14 @@ default = ["abi3"]
 abi3 = ["pyo3/abi3-py39"]
 
 [dependencies]
-pyo3 = { version = "0.23" }
+pyo3 = { version = "0.28" }   # 0.29 dropped abi3-py39; see requires-python
 rmpv = "1.3"          # msgpack Value model — stable, language-agnostic codec
-im = "15.1"           # persistent/immutable maps — O(1) structural-sharing snapshots
+imbl = "7.0"          # persistent/immutable maps — O(1) structural-sharing snapshots
+                      # (maintained fork of `im`, which has been unmaintained since 2021)
 
 [dev-dependencies]
 # Enables embedding a Python interpreter for `cargo test`.
-pyo3 = { version = "0.23", features = ["auto-initialize"] }
+pyo3 = { version = "0.28", features = ["auto-initialize"] }
 
 [profile.release]
 opt-level = 3

@@ -21,10 +21,12 @@ structural-sharing snapshots.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any, cast
+from collections.abc import Iterable, Iterator
+from typing import Any, Optional, cast
 
 import msgpack
+
+from ._snapshot import CopySnapshot, SnapshotMeta
 
 _DEFAULT_URL = "redis://localhost:6379/0"
 
@@ -37,16 +39,27 @@ def _unpack(raw: bytes) -> Any:
     return msgpack.unpackb(raw, raw=False, strict_map_key=False)
 
 
-class RedisSnapshot:
+def _glob_escape(text: str) -> str:
+    """Escape Redis glob metacharacters so a prefix matches literally."""
+    out = []
+    for ch in text:
+        if ch in "\\*?[]^":
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+class RedisSnapshot(CopySnapshot):
     """A copy-based snapshot of a :class:`RedisStore` (O(n))."""
 
-    def __init__(self, data: dict[str, dict[str, bytes]]):
+    def __init__(self, data: dict[str, dict[str, bytes]], *meta: Any):
+        # Keeps the per-namespace mapping for restore()'s pipelined HSETs, and
+        # feeds the flat rows the shared snapshot surface works from.
         self._data = data
-        self.size_bytes = sum(len(v) for ns in data.values() for v in ns.values())
-
-    @property
-    def keys(self) -> list[tuple[str, str]]:
-        return [(ns, k) for ns, kv in self._data.items() for k in kv]
+        super().__init__(
+            [(ns, k, v) for ns, kv in data.items() for k, v in kv.items()],
+            *meta,
+        )
 
 
 class RedisStore:
@@ -69,13 +82,16 @@ class RedisStore:
         self._r = client
         self._prefix = prefix
         self.codec = codec
+        self._snap_meta = SnapshotMeta()
 
     # ------------------------------------------------------------- helpers
     def _hkey(self, namespace: str) -> str:
         return f"{self._prefix}:{namespace}"
 
-    def _iter_hkeys(self) -> Iterator[str]:
-        for raw in self._r.scan_iter(match=f"{self._prefix}:*"):
+    def _iter_hkeys(self, ns_prefix: Optional[str] = None) -> Iterator[str]:
+        pattern = f"{_glob_escape(self._prefix)}:"
+        pattern += f"{_glob_escape(ns_prefix)}*" if ns_prefix else "*"
+        for raw in self._r.scan_iter(match=pattern):
             yield raw.decode() if isinstance(raw, bytes) else raw
 
     def _ns_of(self, hkey: str) -> str:
@@ -111,13 +127,25 @@ class RedisStore:
     def delete(self, namespace: str, key: str) -> bool:
         return bool(self._r.hdel(self._hkey(namespace), key) > 0)
 
-    def keys(self, namespace: str) -> list[str]:
-        return [
-            k.decode() if isinstance(k, bytes) else k for k in self._r.hkeys(self._hkey(namespace))
-        ]
+    def keys(self, namespace: str, prefix: Optional[str] = None) -> list[str]:
+        if prefix is None:
+            raw_keys: Iterable[Any] = self._r.hkeys(self._hkey(namespace))
+        else:
+            raw_keys = self._r.hscan_iter(self._hkey(namespace), match=f"{_glob_escape(prefix)}*")
+            raw_keys = (field for field, _ in raw_keys)
+        return [k.decode() if isinstance(k, bytes) else k for k in raw_keys]
 
-    def namespaces(self) -> list[str]:
-        return [self._ns_of(hk) for hk in self._iter_hkeys()]
+    def max_key(self, namespace: str) -> Optional[str]:
+        """The greatest field name in ``namespace``.
+
+        Redis cannot order hash fields server-side, so this reads them all;
+        ``indexed_max_key`` is therefore left off and callers that need an O(1)
+        answer keep their own pointer.
+        """
+        return max(self.keys(namespace), default=None)
+
+    def namespaces(self, prefix: Optional[str] = None) -> list[str]:
+        return [self._ns_of(hk) for hk in self._iter_hkeys(prefix)]
 
     def clear(self) -> None:
         hkeys = list(self._iter_hkeys())
@@ -139,7 +167,7 @@ class RedisStore:
                 (f.decode() if isinstance(f, bytes) else f): v
                 for f, v in self._r.hgetall(hk).items()
             }
-        return RedisSnapshot(data)
+        return RedisSnapshot(data, *self._snap_meta.next())
 
     def restore(self, snapshot: RedisSnapshot) -> None:
         self.clear()

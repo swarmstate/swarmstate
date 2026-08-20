@@ -27,6 +27,8 @@ store as your LangGraph checkpoints and can be read by any other system.
 from __future__ import annotations
 
 import re
+import threading
+import uuid
 from typing import Any, Optional
 
 from .. import Store
@@ -53,11 +55,34 @@ class SwarmStateStorage:
     def __init__(self, store: Optional[Store] = None, *, namespace: str = "crewai") -> None:
         self.store = store if store is not None else Store()
         self.namespace = namespace
+        self._lock = threading.Lock()
+        self._seq: Optional[int] = None
 
     def _next_key(self) -> str:
-        # Zero-padded monotonic keys keep insertion order sortable.
-        n = len(self.store.keys(self.namespace))
-        return f"{n:012d}"
+        """Return a fresh, insertion-ordered key.
+
+        Zero-padded counter (so keys sort by insertion order) plus a random
+        suffix. The counter is derived from the highest existing key rather than
+        from the entry *count*: counting collided with existing keys after any
+        deletion and silently overwrote a stored memory. The suffix keeps two
+        writers (threads, or processes on a shared backend) from claiming the
+        same key, so a race costs ordering, never an entry.
+        """
+        with self._lock:
+            if self._seq is None:
+                self._seq = self._highest_seq()
+            self._seq += 1
+            seq = self._seq
+        return f"{seq:012d}-{uuid.uuid4().hex[:8]}"
+
+    def _highest_seq(self) -> int:
+        highest = 0
+        for key in self.store.keys(self.namespace):
+            try:
+                highest = max(highest, int(key.split("-", 1)[0]))
+            except ValueError:  # a key we did not write; ignore it for ordering
+                continue
+        return highest
 
     def save(self, value: Any, metadata: Optional[dict[str, Any]] = None) -> None:
         """Persist a memory ``value`` with optional ``metadata``."""

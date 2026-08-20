@@ -104,9 +104,47 @@ def test_invalid_backend_and_codec():
 
 
 def test_max_history_getter():
-    assert ss.Store().max_history is None
+    assert ss.Store().max_history == 0
     assert ss.Store(max_history=5).max_history == 5
+    assert ss.Store(max_history=None).max_history is None
     assert ss.Store().codec == "msgpack"
+
+
+def test_default_store_retains_no_snapshots():
+    """Retention is opt-in: snapshots the store keeps pin the state they saw."""
+    store = ss.Store()
+    store.set("n", "k", {"v": 1})
+    snap = store.snapshot()
+
+    assert store.history() == []
+    # The snapshot handed to the caller is still fully usable and isolated.
+    store.set("n", "k", {"v": 2})
+    store.restore(snap)
+    assert store.get("n", "k") == {"v": 1}
+
+
+def test_max_history_keeps_the_last_n_snapshots():
+    store = ss.Store(max_history=2)
+    ids = []
+    for i in range(4):
+        store.set("n", "k", {"v": i})
+        ids.append(store.snapshot().id)
+
+    kept = store.history()
+    assert [s.id for s in kept] == ids[-2:]
+    # Retained snapshots are real snapshots: usable for a rollback.
+    store.restore(kept[0])
+    assert store.get("n", "k") == {"v": 2}
+
+    store.clear_history()
+    assert store.history() == []
+
+
+def test_unlimited_history_is_opt_in():
+    store = ss.Store(max_history=None)
+    for _ in range(3):
+        store.snapshot()
+    assert len(store.history()) == 3
 
 
 def test_concurrent_writes_are_safe():

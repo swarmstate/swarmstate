@@ -61,8 +61,14 @@ class Store:
         self,
         backend: str = "memory",
         codec: str = "msgpack",
-        max_history: Optional[int] = None,
-    ) -> None: ...
+        max_history: Optional[int] = 0,
+    ) -> None:
+        """``max_history``: snapshots to retain — ``0`` none, ``n`` the last ``n``,
+        ``None`` unlimited. Retained snapshots pin the state they saw, so the
+        default keeps none; snapshots you hold yourself are unaffected.
+        """
+        ...
+
     @property
     def codec(self) -> str: ...
     @property
@@ -92,8 +98,26 @@ class Store:
         """Delete ``(namespace, key)``; return True if a value was removed."""
         ...
 
-    def keys(self, namespace: str) -> list[str]: ...
-    def namespaces(self) -> list[str]: ...
+    def keys(self, namespace: str, prefix: Optional[str] = None) -> list[str]:
+        """Keys in ``namespace``, or only those starting with ``prefix``."""
+        ...
+
+    def max_key(self, namespace: str) -> Optional[str]:
+        """The greatest key in ``namespace``, or ``None`` if it holds nothing.
+
+        Scans the namespace (no key list is built), so it is cheaper than
+        ``max(store.keys(ns))`` but still linear; the persistent SQL backends
+        answer the same call from an index and advertise ``indexed_max_key``.
+        """
+        ...
+
+    def namespaces(self, prefix: Optional[str] = None) -> list[str]:
+        """Namespaces in the store, or only those starting with ``prefix``.
+
+        Filtering in the store copies out only the matching names.
+        """
+        ...
+
     def clear(self) -> None: ...
     def snapshot(self) -> Snapshot:
         """Capture a cheap, immutable snapshot of the current state."""
@@ -103,7 +127,18 @@ class Store:
         """Roll the store back to a previously captured snapshot."""
         ...
 
+    def history(self) -> list[Snapshot]:
+        """Retained snapshots, oldest first (empty unless ``max_history`` was set)."""
+        ...
+
+    def clear_history(self) -> None:
+        """Drop every retained snapshot, releasing the state they pin."""
+        ...
+
     def __len__(self) -> int: ...
+    def __contains__(self, namespace: str) -> bool:
+        """Whether ``namespace`` holds at least one key."""
+        ...
 
 class HandoffGraph:
     """A deterministic, LLM-free routing graph over named nodes.

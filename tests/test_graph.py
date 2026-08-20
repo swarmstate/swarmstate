@@ -99,6 +99,55 @@ def test_introspection():
     assert g.edges("triage") == [("billing", "category == 'billing'"), ("human", None)]
 
 
+def test_routing_ignores_state_the_conditions_never_read():
+    """route() materializes only the paths its conditions name.
+
+    A realistic LangGraph state is mostly message history that no condition looks
+    at; converting all of it dominated the cost of routing.
+    """
+    g = ss.HandoffGraph()
+    g.add_edge("triage", "billing", when="category == 'billing'")
+    g.add_edge("triage", "human")
+
+    heavy = {
+        "category": "billing",
+        "messages": [{"role": "user", "content": "x" * 500} for _ in range(200)],
+    }
+    assert g.route("triage", heavy) == "billing"
+
+    # Unreferenced keys are never serialized, so a value the codec cannot encode
+    # in an unrelated field no longer blocks routing.
+    assert g.route("triage", {"category": "billing", "handle": object()}) == "billing"
+    # A referenced key of an unsupported type is still an error.
+    g.add_edge("check", "yes", when="handle == 1")
+    with pytest.raises(TypeError):
+        g.route("check", {"handle": object()})
+
+
+def test_routing_on_overlapping_condition_paths():
+    g = ss.HandoffGraph()
+    g.add_edge("n", "admin", when="data.user.role == 'admin'")
+    g.add_edge("n", "plain", when="data == 'plain'")  # a shorter path over the same key
+
+    assert g.route("n", {"data": {"user": {"role": "admin"}}}) == "admin"
+    assert g.route("n", {"data": "plain"}) == "plain"
+    assert g.route("n", {"data": {"user": {"role": "guest"}}}) is None
+    assert g.route("n", {}) is None
+
+
+def test_is_dag_on_a_long_chain_is_fast():
+    """Was O(V*E) and recursive: half a second here, and a stack risk."""
+    g = ss.HandoffGraph()
+    for i in range(20_000):
+        g.add_edge(f"n{i}", f"n{i + 1}")
+    assert g.is_dag()
+
+    g2 = ss.HandoffGraph(on_cycle="allow")
+    for i in range(20_000):
+        g2.add_edge(f"n{i}", f"n{(i + 1) % 20_000}")  # closes the loop
+    assert not g2.is_dag()
+
+
 def test_no_python_eval_side_effects():
     """Conditions are data, not code — identifiers are just state lookups."""
     g = ss.HandoffGraph()

@@ -1,64 +1,133 @@
 {
   "meta": {
-    "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
-    "python": "3.14.6",
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7",
     "processor": "arm",
-    "swarmstate": "0.9.1",
-    "iters": 2000,
-    "warmup": 200,
+    "swarmstate": "0.10.4",
+    "iters": 3000,
+    "warmup": 300,
     "seed": 7,
     "payload_msgs": 20,
-    "note": "SwarmStateSaver and InMemorySaver are in-memory; SqliteSaver is file-backed (persistent). Warm cache.",
-    "put_speedup_vs_sqlite": 10.6
+    "note": "Two separate comparisons. Durable: SwarmStateSaver over DiskStore vs SqliteSaver, both SQLite files in WAL mode; the headline pairs them at the same synchronous=NORMAL fsync policy, and SqliteSaver is also measured at its shipped synchronous=FULL. In-memory: SwarmStateSaver vs InMemorySaver, neither of which survives a restart. Warm cache, single process, no concurrent load.",
+    "speedups": {
+      "durable_put": 1.02,
+      "durable_get": 0.92,
+      "in_memory_put": 0.66,
+      "in_memory_get": 8.14
+    }
   },
   "checkpointer": {
-    "SwarmStateSaver": {
+    "SwarmStateSaver+DiskStore": {
       "put": {
-        "p50_ms": 0.0068,
-        "p99_ms": 0.0147,
-        "mean_ms": 0.0072,
-        "min_ms": 0.0052,
-        "ops_per_s": 138610.6
+        "p50_ms": 0.0341,
+        "p99_ms": 0.0876,
+        "mean_ms": 0.0477,
+        "min_ms": 0.0319,
+        "ops_per_s": 20982.1
       },
       "get_tuple": {
-        "p50_ms": 0.0085,
-        "p99_ms": 0.0132,
-        "mean_ms": 0.0086,
-        "min_ms": 0.0075,
-        "ops_per_s": 116320.8
-      }
-    },
-    "InMemorySaver": {
-      "put": {
-        "p50_ms": 0.0042,
-        "p99_ms": 0.0091,
-        "mean_ms": 0.0058,
-        "min_ms": 0.004,
-        "ops_per_s": 170943.3
+        "p50_ms": 0.0157,
+        "p99_ms": 0.0229,
+        "mean_ms": 0.016,
+        "min_ms": 0.0152,
+        "ops_per_s": 62532.1
       },
-      "get_tuple": {
-        "p50_ms": 0.0443,
-        "p99_ms": 0.1083,
-        "mean_ms": 0.0483,
-        "min_ms": 0.0412,
-        "ops_per_s": 20683.0
-      }
+      "durable": true,
+      "config": "SQLite file \u00b7 WAL \u00b7 synchronous=NORMAL"
     },
     "SqliteSaver": {
       "put": {
-        "p50_ms": 0.072,
-        "p99_ms": 0.1411,
-        "mean_ms": 0.087,
-        "min_ms": 0.0581,
-        "ops_per_s": 11499.4
+        "p50_ms": 0.0347,
+        "p99_ms": 0.0756,
+        "mean_ms": 0.0484,
+        "min_ms": 0.0318,
+        "ops_per_s": 20640.7
       },
       "get_tuple": {
-        "p50_ms": 0.0143,
-        "p99_ms": 0.0175,
-        "mean_ms": 0.0144,
-        "min_ms": 0.0137,
-        "ops_per_s": 69411.2
-      }
+        "p50_ms": 0.0145,
+        "p99_ms": 0.0216,
+        "mean_ms": 0.0148,
+        "min_ms": 0.0141,
+        "ops_per_s": 67796.0
+      },
+      "durable": true,
+      "config": "SQLite file \u00b7 WAL \u00b7 synchronous=NORMAL"
+    },
+    "SqliteSaver (synchronous=FULL)": {
+      "put": {
+        "p50_ms": 0.0639,
+        "p99_ms": 0.2119,
+        "mean_ms": 0.0842,
+        "min_ms": 0.0525,
+        "ops_per_s": 11880.7
+      },
+      "get_tuple": {
+        "p50_ms": 0.0144,
+        "p99_ms": 0.0214,
+        "mean_ms": 0.0146,
+        "min_ms": 0.0139,
+        "ops_per_s": 68605.5
+      },
+      "durable": true,
+      "config": "SQLite file \u00b7 WAL \u00b7 synchronous=FULL"
+    },
+    "SwarmStateSaver": {
+      "put": {
+        "p50_ms": 0.0062,
+        "p99_ms": 0.0117,
+        "mean_ms": 0.007,
+        "min_ms": 0.0058,
+        "ops_per_s": 143380.7
+      },
+      "get_tuple": {
+        "p50_ms": 0.0078,
+        "p99_ms": 0.0174,
+        "mean_ms": 0.0081,
+        "min_ms": 0.0074,
+        "ops_per_s": 123598.7
+      },
+      "durable": false,
+      "config": "in-process, not durable"
+    },
+    "InMemorySaver": {
+      "put": {
+        "p50_ms": 0.0041,
+        "p99_ms": 0.0075,
+        "mean_ms": 0.0052,
+        "min_ms": 0.0039,
+        "ops_per_s": 192819.9
+      },
+      "get_tuple": {
+        "p50_ms": 0.0635,
+        "p99_ms": 0.0762,
+        "mean_ms": 0.0638,
+        "min_ms": 0.0603,
+        "ops_per_s": 15663.2
+      },
+      "durable": false,
+      "config": "in-process, not durable"
+    }
+  },
+  "read_scaling": {
+    "thread_lengths": [
+      5,
+      50,
+      500,
+      2000
+    ],
+    "series": {
+      "SwarmStateSaver": [
+        0.00742,
+        0.00733,
+        0.00729,
+        0.00752
+      ],
+      "InMemorySaver": [
+        0.0055,
+        0.00617,
+        0.01392,
+        0.04
+      ]
     }
   },
   "snapshot": {
@@ -69,16 +138,16 @@
       50000
     ],
     "store_snapshot_ms": [
-      0.00044,
-      0.00039,
-      0.00036,
-      0.00038
+      0.00049,
+      0.00045,
+      0.00052,
+      0.00047
     ],
     "dict_deepcopy_ms": [
-      0.08377,
-      0.8439,
-      9.16306,
-      52.31811
+      0.08466,
+      0.82106,
+      8.89582,
+      50.1835
     ]
   },
   "concurrency": {
@@ -89,16 +158,16 @@
       8
     ],
     "store_ops_s": [
-      1236180,
-      373044,
-      192447,
-      137784
+      1630936,
+      515841,
+      199584,
+      134979
     ],
     "dict_lock_ops_s": [
-      7008271,
-      3095990,
-      6522714,
-      6460916
+      2649080,
+      7103796,
+      6593542,
+      6515603
     ]
   }
 }
