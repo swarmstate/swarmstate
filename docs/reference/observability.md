@@ -1,0 +1,3 @@
+# Observability
+
+::: swarmstate.observability

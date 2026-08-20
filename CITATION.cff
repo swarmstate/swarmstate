@@ -1,0 +1,31 @@
+# Citation metadata. GitHub reads this file to render the "Cite this repository"
+# button, and it is what Zenodo uses to fill in the archive record.
+#
+# TODO before the first release: archive the repository on Zenodo (enable the
+# GitHub integration, then publish a release) and paste the concept DOI it mints
+# into the `doi:` field below and into the BibTeX block in README.md and
+# docs/index.md. Until then the DOI is deliberately absent rather than a guess.
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "swarmstate"
+abstract: >-
+  A state and checkpointing backend for multi-agent systems, with a Rust core and
+  a Python API. Drop-in for LangGraph and CrewAI: constant-time checkpoint reads,
+  O(1) state snapshots, and deterministic LLM-free routing.
+authors:
+  - family-names: "Salmeron"
+    given-names: "Jose L."
+year: 2026
+license: MIT
+repository-code: "https://github.com/swarmstate/swarmstate"
+url: "https://swarmstate.github.io/swarmstate/"
+keywords:
+  - multi-agent systems
+  - agents
+  - checkpointing
+  - state management
+  - langgraph
+  - crewai
+  - rust
+# doi: 10.5281/zenodo.XXXXXXXX
