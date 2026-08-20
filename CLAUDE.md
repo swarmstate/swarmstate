@@ -31,15 +31,24 @@ to run on pandas.
 
 1. **State lock-in across frameworks.** Today, if you migrate from CrewAI to LangGraph you lose the accumulated
    state. `swarmstate` provides a store with a framework-agnostic format: any agent reads/writes the same state.
-2. **Checkpointing cost and latency.** LangGraph's per-node checkpointing backed by SQLite/Postgres becomes a
-   bottleneck at scale. `swarmstate` implements LangGraph's checkpointer interface with a Rust backend (fast
-   serialization, incremental snapshots, GIL released on hot paths).
+2. **Checkpoint reads that get slower as threads grow.** Every resume has to find a thread's newest
+   checkpoint, and the reference savers find it by scanning that thread's keys — so a long-lived
+   conversation pays more per step than a fresh one. `swarmstate` implements LangGraph's checkpointer
+   interface with a Rust backend and resolves "latest" by lookup (an O(1) pointer in memory, an indexed
+   `max(key)` on the SQL backends), so read latency is flat: ~7 µs at 5 checkpoints and at 2 000, where
+   `InMemorySaver` climbs from ~5 µs to ~40 µs. Snapshots of the whole checkpoint DB are O(1) via
+   structural sharing. **Writes are a different story and must not be oversold:** durable writes land on
+   par with `SqliteSaver` at a matched fsync policy, and in-memory writes are *slower* than
+   `InMemorySaver` because state is serialized to msgpack — which is what buys the portability and the
+   cheap snapshots.
 3. **Deterministic routing that is currently paid for in tokens.** Many "which agent gets control next" decisions
    don't need an LLM — they are rules over a dependency graph. `swarmstate` exposes a native Rust handoff graph
    that resolves those transitions in microseconds.
 
 **Target user:** the engineer with a *"checkpoint latency"* ticket or an orchestration bill that doesn't add up.
-The sales pitch is **a number in a benchmark**, not an idea.
+The sales pitch is **a number in a benchmark**, not an idea — and the number has to survive a reviewer who
+compares like with like (durable against durable, same fsync policy). Claims that only hold because an
+in-memory store was measured against a file-backed one are worth less than no claim at all.
 
 **Positioning (one line):**
 > Drop-in state backend for LangGraph, CrewAI & custom agent loops — Rust core, framework-agnostic, built for production.
@@ -136,10 +145,12 @@ graph = builder.compile(checkpointer=SwarmStateSaver())   # replaces SqliteSaver
 | ----------------- | ------------ | -------------- | ------------------------------------------------------- |
 | `Store`           | `backend`    | `"memory"`     | `"memory"`, `"redis"` (extra), future `"disk"`          |
 | `Store`           | `codec`      | `"msgpack"`    | state serialization (stable across languages)           |
-| `Store`           | `max_history`| `None`         | number of retained snapshots (None = unlimited)         |
+| `Store`           | `max_history`| `0`            | retained snapshots: `0` none, `n` last `n`, `None` all  |
 | `HandoffGraph`    | `on_cycle`   | `"error"`      | `"error"` or `"allow"` on cycle detection               |
 | `SwarmStateSaver` | `store`      | `Store()`      | underlying store; shareable across graphs               |
 | `SwarmStateSaver` | `serde`      | auto           | (de)serialization compatible with LangGraph             |
+| `SwarmStateSaver` | `incremental`| `False`        | store channel values once per version instead of per step |
+| `SwarmStateSaver` | `max_checkpoints_per_thread` | `None` | retention: keep the newest N per thread (None = all) |
 
 **`Snapshot` object:** `.id`, `.timestamp`, `.keys`, `.size_bytes`, `.parent` (for incremental diffs).
 
@@ -171,7 +182,10 @@ Work in this order. Do not move to the next milestone without green tests.
 **M4 — Benchmarks (the selling argument)**
 - [ ] `benchmarks/`: `SwarmStateSaver` vs `SqliteSaver` (checkpoint latency p50/p99, throughput).
 - [ ] Store vs pure in-memory dict and vs Redis. Produce reproducible charts.
-- [ ] Aim to show a clear improvement (communication target: 10x+ in checkpoint latency vs SQLite).
+- [ ] Compare like with like: durable against durable at a matched fsync policy, in-memory against
+      in-memory. Report the losses too (in-memory writes are slower than `InMemorySaver`).
+- [ ] The claims to communicate are the ones that survive that: **flat read latency** as a thread grows,
+      **O(1) snapshots** of the whole checkpoint DB, and durable writes **on par** with `SqliteSaver`.
 
 **M5 — CrewAI adapter + persistence**
 - [ ] CrewAI state/memory adapter that shares the same `Store` (demonstrate state portability).
@@ -230,7 +244,8 @@ maturin build --release          # produces abi3 wheels
 ## 8. Launch strategy (context, non-blocking)
 
 - The first public artifact should be a **short technical post with the benchmark**, not a buried README:
-  "swap your LangGraph checkpointer for this backend and cut checkpoint latency by Nx".
+  "your LangGraph checkpointer gets slower as the thread grows; this one doesn't" — a different asymptote
+  is a better story than a speed multiplier, and it holds up under scrutiny.
 - Shipping a working end-to-end example adapter is what drives shares on HN/Twitter.
 - Publish wheels for all platforms from `0.1.0`: friction kills early traction.
 

@@ -1,0 +1,87 @@
+site_name: swarmstate
+site_description: >-
+  Drop-in state backend for LangGraph, CrewAI & custom agent loops — Rust core,
+  framework-agnostic, built for production.
+site_url: https://swarmstate.github.io/swarmstate/
+repo_url: https://github.com/swarmstate/swarmstate
+repo_name: swarmstate/swarmstate
+edit_uri: edit/main/docs/
+copyright: MIT licensed
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Guide:
+      - Store & snapshots: guide/store.md
+      - LangGraph checkpointer: guide/langgraph.md
+      - Persistent backends: guide/backends.md
+      - Handoff graph: guide/handoff-graph.md
+      - CrewAI memory: guide/crewai.md
+      - Metrics & tracing: guide/observability.md
+  - Benchmarks: benchmarks.md
+  - API reference:
+      - swarmstate: reference/core.md
+      - Backends: reference/backends.md
+      - Integrations: reference/integrations.md
+      - Observability: reference/observability.md
+      - Store protocol: reference/protocols.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: google
+            # Keep the meaningful dunders (__len__, __contains__) and drop the
+            # noise the extension module carries.
+            filters:
+              - "!^_[^_]"
+              - "!^__(doc|module|new|dict|weakref|slots|annotations|init_subclass|subclasshook)__$"
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            heading_level: 3
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+
+watch:
+  - python/swarmstate
