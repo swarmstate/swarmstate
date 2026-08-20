@@ -411,6 +411,26 @@ fn is_member(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Collect the state paths `expr` reads, without duplicates.
+///
+/// Lets the caller materialize only the parts of a routing state a condition can
+/// actually look at, instead of converting the whole state for every `route()`.
+pub fn collect_paths(expr: &Expr, out: &mut Vec<Vec<String>>) {
+    match expr {
+        Expr::Var(path) => {
+            if !out.contains(path) {
+                out.push(path.clone());
+            }
+        }
+        Expr::Not(inner) => collect_paths(inner, out),
+        Expr::And(a, b) | Expr::Or(a, b) | Expr::Cmp(_, a, b) => {
+            collect_paths(a, out);
+            collect_paths(b, out);
+        }
+        Expr::Str(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Null => {}
+    }
+}
+
 fn lookup<'a>(state: &'a Value, path: &[String]) -> Option<&'a Value> {
     let mut cur = state;
     for seg in path {

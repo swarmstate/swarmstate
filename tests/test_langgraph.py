@@ -104,6 +104,23 @@ def test_incremental_mode_roundtrip():
     assert g2.get_state(cfg).values["count"] == 2
 
 
+def test_retention_bounds_a_long_running_graph():
+    """A real graph looping for a long time must not grow the store forever."""
+    store = ss.Store()
+    g = make_graph(SwarmStateSaver(store, max_checkpoints_per_thread=4))
+    cfg = {"configurable": {"thread_id": "long"}}
+
+    for _ in range(10):
+        g.invoke({"count": 0, "trail": []}, cfg)
+    bounded = len(store)
+
+    for _ in range(40):
+        g.invoke({"count": 0, "trail": []}, cfg)
+
+    assert len(store) <= bounded  # steady state, not linear growth
+    assert g.get_state(cfg).values["count"] == 50  # and the thread still resumes
+
+
 def test_async_ainvoke_and_aget_state():
     import asyncio
 

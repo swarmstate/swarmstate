@@ -67,12 +67,60 @@ def test_snapshot_restore(tmp_path):
 
 
 def test_msgpack_wire_format_is_standard(tmp_path):
+    """Any SQLite + msgpack consumer can read the file, without swarmstate."""
+    import sqlite3
+
     import msgpack
 
-    s = DiskStore(str(tmp_path / "s.db"))
+    path = str(tmp_path / "s.db")
+    s = DiskStore(path)
     s.set("ns", "k", {"hello": "world", "n": 7})
-    row = s._conn.execute("SELECT v FROM kv WHERE ns='ns' AND k='k'").fetchone()
+
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute("SELECT v FROM kv WHERE ns='ns' AND k='k'").fetchone()
+    finally:
+        conn.close()
     assert msgpack.unpackb(row[0], raw=False) == {"hello": "world", "n": 7}
+
+
+def test_concurrent_threads_share_the_file(tmp_path):
+    """Each thread gets its own connection; reads no longer serialize behind one."""
+    import threading
+
+    s = DiskStore(str(tmp_path / "conc.db"))
+    errors: list[Exception] = []
+
+    def worker(tid: int) -> None:
+        try:
+            for i in range(50):
+                s.set(f"t{tid}", str(i), {"tid": tid, "i": i})
+            for i in range(50):
+                assert s.get(f"t{tid}", str(i)) == {"tid": tid, "i": i}
+        except Exception as exc:  # pragma: no cover - only on failure
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert len(s) == 200
+    s.close()
+
+
+def test_restore_is_atomic(tmp_path):
+    """A failed restore must not leave the table wiped."""
+    s = DiskStore(str(tmp_path / "atomic.db"))
+    s.set("ns", "a", {"v": 1})
+    snap = s.snapshot()
+    snap._rows = [("ns", "a", b"\x01"), ("ns", "a", b"\x02")]  # duplicate PK -> fails
+
+    with pytest.raises(Exception):
+        s.restore(snap)
+    assert s.get("ns", "a") == {"v": 1}
 
 
 def test_as_langgraph_checkpointer_backend(tmp_path):

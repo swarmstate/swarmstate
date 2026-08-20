@@ -45,6 +45,21 @@ from ..observability import MetricsSink
 # Unit-separator delimiter: never appears in thread ids / namespaces.
 _SEP = "\x1f"
 
+# Namespace holding the "latest checkpoint id" pointer per (thread, ns). It lives
+# in the store rather than in the saver so that every saver and every process
+# sharing a backend agrees on which checkpoint is the latest one.
+_LATEST_NS = "lt"
+
+# Cap for the write-side hint dict (see SwarmStateSaver._max_seen): it only
+# avoids a read, so dropping it wholesale when it grows is harmless.
+_MAX_HINTS = 4096
+
+# Retention runs in batches: a thread is trimmed back to the limit only once it
+# is this far above it (or a quarter of the limit, whichever is larger). Pruning
+# has to look at the surviving checkpoints, so batching keeps that off the hot
+# path — the cost lands on one put in every `slack`, not on all of them.
+_PRUNE_SLACK = 8
+
 _T = TypeVar("_T")
 
 
@@ -78,18 +93,32 @@ def _blobs_ns(thread_id: str, checkpoint_ns: str) -> str:
     return f"bl{_SEP}{thread_id}{_SEP}{checkpoint_ns}"
 
 
+def _latest_key(thread_id: str, checkpoint_ns: str) -> str:
+    return f"{thread_id}{_SEP}{checkpoint_ns}"
+
+
 class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base is Any (no stubs)
     """A LangGraph checkpointer backed by a swarmstate :class:`~swarmstate.Store`.
 
     Args:
         store: underlying store; defaults to a fresh in-memory ``Store()``.
-            Share one ``Store`` across savers/graphs for a unified checkpoint DB.
+            Share one ``Store`` across savers/graphs for a unified checkpoint DB:
+            the "latest checkpoint" pointer is kept in the store itself, so every
+            saver (and every process, on a networked backend) sees the newest
+            checkpoint regardless of which one wrote it.
         serde: optional LangGraph serializer (defaults to ``JsonPlusSerializer``).
         incremental: if True, store each channel value once per version (dedup)
             instead of the whole checkpoint blob per step. Saves storage and
             serialization for long threads with large, mostly-stable channels,
             at the cost of extra reads on ``get_tuple`` (one per channel). The
             default (False) keeps ``get_tuple`` at a single read.
+        max_checkpoints_per_thread: keep only the newest N checkpoints of each
+            thread, dropping older ones (with their pending writes, and their
+            channel blobs when ``incremental``). ``None`` — the default —
+            keeps every checkpoint, which means an in-memory store grows for as
+            long as the process runs. Trimming happens in batches, so a thread
+            can sit slightly above N before it is cut back; time travel past the
+            retained window is no longer possible, so size it accordingly.
         metrics: optional :class:`~swarmstate.observability.MetricsSink` that
             receives the latency and outcome of each ``put`` / ``put_writes`` /
             ``get_tuple``. Defaults to ``None`` (no measurement, zero overhead).
@@ -106,17 +135,32 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         *,
         serde: Optional[SerializerProtocol] = None,
         incremental: bool = False,
+        max_checkpoints_per_thread: Optional[int] = None,
         metrics: Optional[MetricsSink] = None,
         tracer: Any = None,
     ) -> None:
         super().__init__(serde=serde)
+        if max_checkpoints_per_thread is not None and max_checkpoints_per_thread < 1:
+            raise ValueError("max_checkpoints_per_thread must be >= 1 (or None to keep all)")
         self.store: Store = store if store is not None else Store()
         self.incremental = incremental
+        self.max_checkpoints_per_thread = max_checkpoints_per_thread
         self._metrics = metrics
         self._tracer = tracer
-        # O(1) "latest checkpoint id" cache per (thread_id, checkpoint_ns).
-        # A best-effort fast path for get_tuple; always falls back to a scan.
-        self._latest: dict[tuple[str, str], str] = {}
+        # Write-side hint: the highest checkpoint id this saver has published per
+        # (thread_id, checkpoint_ns). Used only to skip re-publishing the latest
+        # pointer for an out-of-order put, never to answer a read — reads go to
+        # the pointer in the store so that savers sharing a backend agree.
+        self._max_seen: dict[tuple[str, str], str] = {}
+        # Whether the store can filter namespaces/keys by prefix itself. Assumed,
+        # then turned off for good the first time a store rejects the argument.
+        self._store_takes_prefix = True
+        # How "which checkpoint is the latest" gets answered. A store whose
+        # max_key is index-backed (the SQL backends) is asked directly, which is
+        # both always-current and one row less to write per put. Everything else
+        # gets the pointer below, because scanning a long thread's keys for a
+        # maximum costs far more than reading one extra row.
+        self._store_indexes_max_key = bool(getattr(self.store, "indexed_max_key", False))
 
     def _run(self, op: str, thread_id: str, attrs: dict[str, Any], fn: Callable[[], _T]) -> _T:
         """Run ``fn`` under the configured span (tracer) and timer (metrics).
@@ -217,19 +261,33 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
 
         cp_type, cp_bytes = self.serde.dumps_typed(cp_to_store)
         md_type, md_bytes = self.serde.dumps_typed(get_checkpoint_metadata(config, metadata))
-        self.store.set(
-            _ckpt_ns(thread_id, checkpoint_ns),
-            checkpoint_id,
-            {
-                "cp": [cp_type, cp_bytes],
-                "md": [md_type, md_bytes],
-                "parent": cfg.get("checkpoint_id"),
-            },
-        )
-        key = (thread_id, checkpoint_ns)
-        cur = self._latest.get(key)
-        if cur is None or checkpoint_id > cur:
-            self._latest[key] = checkpoint_id
+        batch: List[tuple[str, str, Any]] = [
+            (
+                _ckpt_ns(thread_id, checkpoint_ns),
+                checkpoint_id,
+                {
+                    "cp": [cp_type, cp_bytes],
+                    "md": [md_type, md_bytes],
+                    "parent": cfg.get("checkpoint_id"),
+                },
+            )
+        ]
+        # Publish the latest pointer alongside the checkpoint, in the same
+        # set_many (one lock / one round-trip for both). The hint keeps an
+        # out-of-order put from moving the pointer backwards, matching the
+        # reference savers' max(checkpoint_id) semantics without an extra read.
+        # Stores that index max_key need no pointer at all.
+        if not self._store_indexes_max_key:
+            key = (thread_id, checkpoint_ns)
+            seen = self._max_seen.get(key)
+            if seen is None or checkpoint_id > seen:
+                if len(self._max_seen) >= _MAX_HINTS:
+                    self._max_seen.clear()
+                self._max_seen[key] = checkpoint_id
+                batch.append((_LATEST_NS, _latest_key(thread_id, checkpoint_ns), checkpoint_id))
+        self._set_many(batch)
+        if self.max_checkpoints_per_thread is not None:
+            self._prune_thread(thread_id, checkpoint_ns)
         return {
             "configurable": {
                 "thread_id": thread_id,
@@ -310,17 +368,23 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         ns = _ckpt_ns(thread_id, checkpoint_ns)
 
         checkpoint_id = get_checkpoint_id(config)
-        if not checkpoint_id:
-            # Fast path: cached latest id; fall back to a scan (cold saver, or
-            # after a store.restore invalidated the cache).
-            cache_key = (thread_id, checkpoint_ns)
-            checkpoint_id = self._latest.get(cache_key)
+        if not checkpoint_id and self._store_indexes_max_key:
+            checkpoint_id = self.store.max_key(ns)
+            if not checkpoint_id:
+                return None
+        elif not checkpoint_id:
+            # Fast path: the latest pointer from the store — shared, so a
+            # checkpoint written by another saver or process is visible here.
+            latest_key = _latest_key(thread_id, checkpoint_ns)
+            checkpoint_id = self.store.get(_LATEST_NS, latest_key)
             if not checkpoint_id or not self.store.contains(ns, checkpoint_id):
+                # No pointer (store written by an older version) or it dangles
+                # (a restore rolled the thread back past it): scan and republish.
                 keys = self.store.keys(ns)
                 if not keys:
                     return None
                 checkpoint_id = max(keys)
-                self._latest[cache_key] = checkpoint_id
+                self.store.set(_LATEST_NS, latest_key, checkpoint_id)
 
         saved = self.store.get(ns, checkpoint_id)
         if saved is None:
@@ -335,14 +399,16 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         before: Optional[RunnableConfig] = None,
         limit: Optional[int] = None,
     ) -> Iterator[CheckpointTuple]:
-        # Determine which (thread_id, checkpoint_ns) namespaces to scan.
+        # Determine which (thread_id, checkpoint_ns) namespaces to scan. Asking the
+        # store for the matching prefix keeps this off the "copy every namespace
+        # name in the store" path, which a busy store makes expensive.
         if config is not None:
             thread_id = config["configurable"]["thread_id"]
             want_ns = config["configurable"].get("checkpoint_ns")
             targets = []
-            for ns in self.store.namespaces():
+            for ns in self._namespaces(f"ck{_SEP}{thread_id}{_SEP}"):
                 parts = ns.split(_SEP)
-                if len(parts) != 3 or parts[0] != "ck" or parts[1] != thread_id:
+                if len(parts) != 3 or parts[1] != thread_id:
                     continue
                 if want_ns is not None and parts[2] != want_ns:
                     continue
@@ -350,8 +416,8 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
         else:
             targets = [
                 (p[1], p[2], ns)
-                for ns in self.store.namespaces()
-                if len(p := ns.split(_SEP)) == 3 and p[0] == "ck"
+                for ns in self._namespaces(f"ck{_SEP}")
+                if len(p := ns.split(_SEP)) == 3
             ]
 
         want_id = get_checkpoint_id(config) if config else None
@@ -376,13 +442,20 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
                     return
 
     def delete_thread(self, thread_id: str) -> None:
-        for ns in self.store.namespaces():
-            parts = ns.split(_SEP)
-            if len(parts) >= 2 and parts[0] in ("ck", "wr") and parts[1] == thread_id:
+        # "bl" too: the incremental channel blobs are the bulk of a thread's
+        # bytes, and leaving them behind means the data is not really gone.
+        for kind in ("ck", "wr", "bl"):
+            for ns in self._namespaces(f"{kind}{_SEP}{thread_id}{_SEP}"):
+                parts = ns.split(_SEP)
+                if len(parts) < 2 or parts[1] != thread_id:
+                    continue
                 for key in self.store.keys(ns):
                     self.store.delete(ns, key)
-        for k in [k for k in self._latest if k[0] == thread_id]:
-            del self._latest[k]
+        if not self._store_indexes_max_key:
+            for key in self._keys(_LATEST_NS, f"{thread_id}{_SEP}"):
+                self.store.delete(_LATEST_NS, key)
+        for k in [k for k in self._max_seen if k[0] == thread_id]:
+            del self._max_seen[k]
 
     # ------------------------------------------------------------------ async
     # The store releases the GIL on its hot paths, so offloading each call to a
@@ -427,7 +500,82 @@ class SwarmStateSaver(BaseCheckpointSaver[str]):  # type: ignore[misc]  # base i
     async def adelete_thread(self, thread_id: str) -> None:
         await asyncio.to_thread(self.delete_thread, thread_id)
 
+    # -------------------------------------------------------------- retention
+
+    def _prune_thread(self, thread_id: str, checkpoint_ns: str) -> None:
+        """Trim a thread back to ``max_checkpoints_per_thread`` newest checkpoints.
+
+        Runs only once a thread is ``_PRUNE_SLACK`` (or a quarter of the limit)
+        checkpoints above the limit, so the survivor scan below is amortized.
+        """
+        limit = self.max_checkpoints_per_thread
+        if limit is None:
+            return
+        ck_ns = _ckpt_ns(thread_id, checkpoint_ns)
+        ids = self.store.keys(ck_ns)
+        if len(ids) <= limit + max(_PRUNE_SLACK, limit // 4):
+            return
+
+        ids.sort()
+        cut = len(ids) - limit
+        doomed, survivors = ids[:cut], ids[cut:]
+
+        if self.incremental:
+            # Blobs are shared by version, and a checkpoint forked from an older
+            # one can reference a version older than its siblings' — so the keep
+            # set is the union over *every* survivor, not just the oldest.
+            keep = self._referenced_blobs(thread_id, checkpoint_ns, survivors)
+            bl_ns = _blobs_ns(thread_id, checkpoint_ns)
+            for bkey in self.store.keys(bl_ns):
+                if bkey not in keep:
+                    self.store.delete(bl_ns, bkey)
+
+        for checkpoint_id in doomed:
+            wr_ns = _writes_ns(thread_id, checkpoint_ns, checkpoint_id)
+            for key in self.store.keys(wr_ns):
+                self.store.delete(wr_ns, key)
+            self.store.delete(ck_ns, checkpoint_id)
+
+    def _referenced_blobs(
+        self, thread_id: str, checkpoint_ns: str, checkpoint_ids: Sequence[str]
+    ) -> "set[str]":
+        """Blob keys still referenced by the given checkpoints' channel versions."""
+        ck_ns = _ckpt_ns(thread_id, checkpoint_ns)
+        keep: set[str] = set()
+        for saved in self._get_many(ck_ns, checkpoint_ids):
+            if saved is None:
+                continue
+            checkpoint = self.serde.loads_typed(tuple(saved["cp"]))
+            for channel, version in checkpoint.get("channel_versions", {}).items():
+                keep.add(f"{channel}{_SEP}{version}")
+        return keep
+
     # ---------------------------------------------------------------- helpers
+
+    def _namespaces(self, prefix: str) -> List[str]:
+        """Namespaces starting with ``prefix``, filtered by the store when it can.
+
+        The bundled stores filter internally, so only the matching names are
+        copied out. A custom store with the older no-argument signature still
+        works — it just copies everything and filters here.
+        """
+        if self._store_takes_prefix:
+            try:
+                matched: List[str] = self.store.namespaces(prefix=prefix)
+                return matched
+            except TypeError:
+                self._store_takes_prefix = False
+        return [ns for ns in self.store.namespaces() if ns.startswith(prefix)]
+
+    def _keys(self, namespace: str, prefix: str) -> List[str]:
+        """Keys of ``namespace`` starting with ``prefix`` (see :meth:`_namespaces`)."""
+        if self._store_takes_prefix:
+            try:
+                matched: List[str] = self.store.keys(namespace, prefix=prefix)
+                return matched
+            except TypeError:
+                self._store_takes_prefix = False
+        return [key for key in self.store.keys(namespace) if key.startswith(prefix)]
 
     # ``list`` (the LangGraph method) shadows the builtin in this class's method
     # annotations, so batch helpers spell their list types with ``List``.

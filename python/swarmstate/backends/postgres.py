@@ -24,9 +24,13 @@ from __future__ import annotations
 
 import re
 import threading
-from typing import Any, cast
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, Optional, cast
 
 import msgpack
+
+from ._snapshot import CopySnapshot, SnapshotMeta
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -39,28 +43,26 @@ def _unpack(raw: Any) -> Any:
     return msgpack.unpackb(bytes(raw), raw=False, strict_map_key=False)
 
 
-class PostgresSnapshot:
+class PostgresSnapshot(CopySnapshot):
     """A copy-based snapshot of a :class:`PostgresStore` (O(n))."""
-
-    def __init__(self, rows: list[tuple[str, str, bytes]]):
-        self._rows = rows
-        self.size_bytes = sum(len(v) for _, _, v in rows)
-
-    @property
-    def keys(self) -> list[tuple[str, str]]:
-        return [(ns, k) for ns, k, _ in self._rows]
 
 
 class PostgresStore:
     """Postgres-backed store implementing the :class:`swarmstate.Store` interface."""
+
+    #: ``max_key`` is answered from the ``(ns, k)`` primary-key index (see
+    #: :class:`~swarmstate.backends.disk.DiskStore`).
+    indexed_max_key = True
 
     def __init__(
         self,
         dsn: str = "postgresql:///swarmstate",
         *,
         conn: Any = None,
+        pool: Any = None,
         table: str = "swarmstate_kv",
         codec: str = "msgpack",
+        max_size: int = 8,
     ) -> None:
         if codec != "msgpack":
             raise ValueError(f"codec '{codec}' is not supported (only 'msgpack')")
@@ -68,30 +70,60 @@ class PostgresStore:
             raise ValueError(f"invalid table name: {table!r}")
         self.table = table
         self.codec = codec
+        # Single-connection mode keeps a mutex, so concurrent callers queue up on
+        # one connection; a pool lets them work in parallel, which is what a
+        # multi-worker service needs. An injected `conn` opts out on purpose.
         self._lock = threading.Lock()
-        if conn is None:
-            import psycopg
-
-            conn = psycopg.connect(dsn, autocommit=True)
-        self._conn = conn
-        with self._lock:
-            self._conn.execute(
+        self._snap_meta = SnapshotMeta()
+        self._conn: Any = conn
+        self._pool: Any = pool
+        if self._conn is None and self._pool is None:
+            self._pool = self._make_pool(dsn, max_size)
+        with self._connection() as c:
+            c.execute(
                 f"CREATE TABLE IF NOT EXISTS {table} "
                 "(ns text NOT NULL, k text NOT NULL, v bytea NOT NULL, PRIMARY KEY (ns, k))"
             )
 
+    def _make_pool(self, dsn: str, max_size: int) -> Any:
+        """Open a psycopg connection pool, or fall back to a single connection.
+
+        ``psycopg_pool`` is a separate distribution, so an install without it
+        still works — just serialized through one connection, as before.
+        """
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError:
+            import psycopg
+
+            self._conn = psycopg.connect(dsn, autocommit=True)
+            return None
+        return ConnectionPool(
+            dsn, min_size=1, max_size=max_size, open=True, kwargs={"autocommit": True}
+        )
+
+    @contextmanager
+    def _connection(self) -> Iterator[Any]:
+        """Yield a connection: one from the pool, or the shared one under lock."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                yield conn
+        else:
+            with self._lock:
+                yield self._conn
+
     # ------------------------------------------------------------- core API
     def set(self, namespace: str, key: str, value: Any) -> None:
-        with self._lock:
-            self._conn.execute(
+        with self._connection() as conn:
+            conn.execute(
                 f"INSERT INTO {self.table} (ns, k, v) VALUES (%s, %s, %s) "
                 "ON CONFLICT (ns, k) DO UPDATE SET v = EXCLUDED.v",
                 (namespace, key, _pack(value)),
             )
 
     def get(self, namespace: str, key: str, default: Any = None) -> Any:
-        with self._lock:
-            row = self._conn.execute(
+        with self._connection() as conn:
+            row = conn.execute(
                 f"SELECT v FROM {self.table} WHERE ns = %s AND k = %s", (namespace, key)
             ).fetchone()
         return default if row is None else _unpack(row[0])
@@ -100,8 +132,8 @@ class PostgresStore:
         if not items:
             return
         rows = [(ns, k, _pack(v)) for ns, k, v in items]
-        with self._lock:
-            self._conn.cursor().executemany(
+        with self._connection() as conn:
+            conn.cursor().executemany(
                 f"INSERT INTO {self.table} (ns, k, v) VALUES (%s, %s, %s) "
                 "ON CONFLICT (ns, k) DO UPDATE SET v = EXCLUDED.v",
                 rows,
@@ -113,8 +145,8 @@ class PostgresStore:
         nss = [p[0] for p in pairs]
         ks = [p[1] for p in pairs]
         # unnest two arrays positionally, then join: one round-trip for the batch.
-        with self._lock:
-            rows = self._conn.execute(
+        with self._connection() as conn:
+            rows = conn.execute(
                 f"SELECT t.ns, t.k, t.v FROM {self.table} t "
                 "JOIN unnest(%s::text[], %s::text[]) AS q(ns, k) "
                 "ON t.ns = q.ns AND t.k = q.k",
@@ -124,64 +156,88 @@ class PostgresStore:
         return [None if (p := (ns, k)) not in found else _unpack(found[p]) for ns, k in pairs]
 
     def contains(self, namespace: str, key: str) -> bool:
-        with self._lock:
-            row = self._conn.execute(
+        with self._connection() as conn:
+            row = conn.execute(
                 f"SELECT 1 FROM {self.table} WHERE ns = %s AND k = %s", (namespace, key)
             ).fetchone()
         return row is not None
 
     def delete(self, namespace: str, key: str) -> bool:
-        with self._lock:
-            cur = self._conn.execute(
+        with self._connection() as conn:
+            cur = conn.execute(
                 f"DELETE FROM {self.table} WHERE ns = %s AND k = %s", (namespace, key)
             )
             return bool(cur.rowcount > 0)
 
-    def keys(self, namespace: str) -> list[str]:
-        with self._lock:
-            rows = self._conn.execute(
-                f"SELECT k FROM {self.table} WHERE ns = %s", (namespace,)
-            ).fetchall()
+    def keys(self, namespace: str, prefix: Optional[str] = None) -> list[str]:
+        sql = f"SELECT k FROM {self.table} WHERE ns = %s"
+        params: tuple[Any, ...] = (namespace,)
+        if prefix is not None:
+            # starts_with, not LIKE: keys carry user data that may contain
+            # LIKE wildcards.
+            sql += " AND starts_with(k, %s)"
+            params += (prefix,)
+        with self._connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [r[0] for r in rows]
 
-    def namespaces(self) -> list[str]:
-        with self._lock:
-            rows = self._conn.execute(f"SELECT DISTINCT ns FROM {self.table}").fetchall()
+    def max_key(self, namespace: str) -> Optional[str]:
+        """The greatest key in ``namespace``, via the primary-key index."""
+        with self._connection() as conn:
+            row = conn.execute(
+                f"SELECT max(k) FROM {self.table} WHERE ns = %s", (namespace,)
+            ).fetchone()
+        return None if row is None else cast(Optional[str], row[0])
+
+    def namespaces(self, prefix: Optional[str] = None) -> list[str]:
+        sql = f"SELECT DISTINCT ns FROM {self.table}"
+        params: tuple[Any, ...] = ()
+        if prefix is not None:
+            sql += " WHERE starts_with(ns, %s)"
+            params = (prefix,)
+        with self._connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [r[0] for r in rows]
 
     def clear(self) -> None:
-        with self._lock:
-            self._conn.execute(f"DELETE FROM {self.table}")
+        with self._connection() as conn:
+            conn.execute(f"DELETE FROM {self.table}")
 
     def __len__(self) -> int:
-        with self._lock:
-            return int(self._conn.execute(f"SELECT count(*) FROM {self.table}").fetchone()[0])
+        with self._connection() as conn:
+            return int(conn.execute(f"SELECT count(*) FROM {self.table}").fetchone()[0])
 
     def __contains__(self, namespace: str) -> bool:
-        with self._lock:
-            row = self._conn.execute(
+        with self._connection() as conn:
+            row = conn.execute(
                 f"SELECT 1 FROM {self.table} WHERE ns = %s LIMIT 1", (namespace,)
             ).fetchone()
         return row is not None
 
     # ------------------------------------------------------------- snapshot
     def snapshot(self) -> PostgresSnapshot:
-        with self._lock:
-            rows = self._conn.execute(f"SELECT ns, k, v FROM {self.table}").fetchall()
-        return PostgresSnapshot([(ns, k, bytes(v)) for ns, k, v in rows])
+        with self._connection() as conn:
+            rows = conn.execute(f"SELECT ns, k, v FROM {self.table}").fetchall()
+        return PostgresSnapshot([(ns, k, bytes(v)) for ns, k, v in rows], *self._snap_meta.next())
 
     def restore(self, snapshot: PostgresSnapshot) -> None:
-        with self._lock:
-            with self._conn.transaction():
-                self._conn.execute(f"DELETE FROM {self.table}")
-                self._conn.cursor().executemany(
+        with self._connection() as conn:
+            with conn.transaction():
+                conn.execute(f"DELETE FROM {self.table}")
+                conn.cursor().executemany(
                     f"INSERT INTO {self.table} (ns, k, v) VALUES (%s, %s, %s)",
                     snapshot._rows,
                 )
 
     def close(self) -> None:
-        with self._lock:
-            self._conn.close()
+        """Close the pool (or the single connection)."""
+        if self._pool is not None:
+            self._pool.close()
+            self._pool = None
+        elif self._conn is not None:
+            with self._lock:
+                self._conn.close()
+            self._conn = None
 
     def __repr__(self) -> str:
         return f"PostgresStore(table={self.table!r}, codec='{self.codec}')"
