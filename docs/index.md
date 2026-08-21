@@ -66,7 +66,13 @@ g.route("triage", {"category": "billing"})          # -> "billing", resolved in 
 - **It does not do semantic search.** The CrewAI adapter is lexical recall, not a vector
   store — see [CrewAI memory](guide/crewai.md).
 
-## Citing swarmstate
+## Citing
+
+If you use `swarmstate` in academic work, please cite it. GitHub's **"Cite this
+repository"** button (from
+[`CITATION.cff`](https://github.com/swarmstate/swarmstate/blob/main/CITATION.cff))
+produces ready-made APA and BibTeX entries. To cite the archived software release, use
+its Zenodo DOI (`10.5281/zenodo.XXXXXXXX`):
 
 ```bibtex
 @software{salmeron_swarmstate,
@@ -81,9 +87,10 @@ g.route("triage", {"category": "billing"})          # -> "billing", resolved in 
 ```
 
 !!! note "DOI pending"
-    The DOI above is a placeholder until the first release is archived on Zenodo.
-    `CITATION.cff` in the repository carries the same metadata, which is what
-    GitHub's "Cite this repository" button and Zenodo read.
+    `10.5281/zenodo.XXXXXXXX` is a placeholder until the first release is archived on
+    Zenodo — deliberately, rather than an identifier that does not resolve. `CITATION.cff`
+    carries the same metadata, and it is what both GitHub's citation button and Zenodo
+    read when the record is created.
 
 ## Where to go next
 
