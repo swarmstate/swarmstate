@@ -1,3 +1,0 @@
-# Store protocol
-
-::: swarmstate.protocols

@@ -57,8 +57,9 @@ an identifier is only ever a state lookup.
 carry a depth limit. An unbounded walker exhausts the native stack and takes the whole
 interpreter with it — an error is always better than a `SIGSEGV`.
 
-**Release the GIL where it is free.** Operations that do not touch Python objects run
-inside `py.allow_threads`. Serialization stays under the GIL; lock and map work does not.
+**Detach from the interpreter where it is free.** Operations that do not touch Python
+objects run inside `py.detach` (PyO3's old `allow_threads`). Serialization stays attached;
+lock and map work does not.
 
 **No compiler for users.** `pip install swarmstate` must work from a prebuilt abi3 wheel.
 If a change forces users to compile Rust, it is a bug.
@@ -94,13 +95,19 @@ Record hardware, versions, seed and payload — `run.py` already writes them int
 
 ## Docs
 
+The documentation site lives in its own repository,
+[`swarmstate/swarmstate.github.io`](https://github.com/swarmstate/swarmstate.github.io),
+and is published at <https://swarmstate.github.io/>:
+
 ```bash
-pip install -e ".[docs]"
-./scripts/build-docs.sh --serve      # http://127.0.0.1:8000
+git clone https://github.com/swarmstate/swarmstate.github.io
+cd swarmstate.github.io && pip install -r requirements.txt
+mkdocs serve --strict                # http://127.0.0.1:8000
 ```
 
-The API reference is generated from the installed package and the `_core.pyi` stubs, so a
-new public method needs a docstring and a stub entry. `--strict` treats warnings as errors.
+A change to the public API is not finished until the guide and `docs/api.md` there match
+it. The build runs `--strict` with link and anchor validation on, so a moved heading fails
+the build rather than rotting a cross-reference.
 
 ## Commits and PRs
 

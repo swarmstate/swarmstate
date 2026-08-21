@@ -51,9 +51,9 @@ implementation at every width boundary.
   on the backends.
 - Uniform snapshot metadata (`id`, `timestamp`, `parent`, `diff`) on the `DiskStore`,
   `RedisStore` and `PostgresStore` snapshots.
-- A documentation site (MkDocs Material) with a guide and API reference, built by
-  `scripts/build-docs.sh` and published from CI, plus `CONTRIBUTING.md`, `SECURITY.md` and
-  this changelog.
+- `CONTRIBUTING.md`, `SECURITY.md`, `CITATION.cff` and this changelog. The documentation
+  site (in `swarmstate/swarmstate.github.io`) gains a Citing section, corrected benchmark
+  pages, and coverage of everything new here.
 - CI: the LangGraph adapters are tested against both ends of the declared range (the `0.2`
   floor and current), coverage is gated at 80%, free-threaded 3.13t **and** 3.14t are
   exercised, and the benchmark script is run so it cannot rot unnoticed.

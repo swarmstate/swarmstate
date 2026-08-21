@@ -147,12 +147,14 @@ Runnable, offline, deterministic demos in [`examples/`](examples/):
 
 ## Documentation
 
-Guide and API reference: **[swarmstate.github.io/swarmstate](https://swarmstate.github.io/swarmstate/)**
-— the [store and snapshots](docs/guide/store.md), the
-[LangGraph checkpointer](docs/guide/langgraph.md), the
-[persistent backends](docs/guide/backends.md), the
-[handoff graph](docs/guide/handoff-graph.md), and the
-[benchmark method](docs/benchmarks.md).
+Guide, tutorials and API reference: **[swarmstate.github.io](https://swarmstate.github.io/)**
+— [the store](https://swarmstate.github.io/guide/store/),
+[snapshots & diffs](https://swarmstate.github.io/guide/snapshots/),
+[the LangGraph checkpointer](https://swarmstate.github.io/guide/langgraph/),
+[persistent backends](https://swarmstate.github.io/guide/disk/),
+[the handoff graph](https://swarmstate.github.io/guide/handoff/) and the
+[benchmark method](https://swarmstate.github.io/benchmarks/). The site is built from
+[`swarmstate/swarmstate.github.io`](https://github.com/swarmstate/swarmstate.github.io).
 
 ## Development
 
@@ -163,8 +165,6 @@ maturin develop --release     # compile the Rust core and install it locally
 cargo test                    # Rust core tests
 pytest -q                     # Python API tests
 
-pip install -e ".[docs]"
-./scripts/build-docs.sh --serve   # docs at http://127.0.0.1:8000
 ```
 
 ## Citing
@@ -187,8 +187,8 @@ BibTeX entries. To cite the archived software release, use its Zenodo DOI
 ```
 
 <sub>The DOI is minted when the first release is archived on Zenodo. Replacing
-`10.5281/zenodo.XXXXXXXX` here, in [`docs/index.md`](docs/index.md) and in
-[`CITATION.cff`](CITATION.cff) is all it takes — the placeholder is deliberate, so that
+`10.5281/zenodo.XXXXXXXX` here, in [`CITATION.cff`](CITATION.cff) and on the docs site is
+all it takes — the placeholder is deliberate, so that
 nothing cites an identifier that does not resolve.</sub>
 
 ## License
