@@ -167,9 +167,12 @@ pip install -e ".[docs]"
 ./scripts/build-docs.sh --serve   # docs at http://127.0.0.1:8000
 ```
 
-## Citation
+## Citing
 
-If you use swarmstate in academic work, please cite it:
+If you use `swarmstate` in academic work, please cite it. GitHub's **"Cite this
+repository"** button (from [`CITATION.cff`](CITATION.cff)) produces ready-made APA and
+BibTeX entries. To cite the archived software release, use its Zenodo DOI
+(`10.5281/zenodo.XXXXXXXX`):
 
 ```bibtex
 @software{salmeron_swarmstate,
@@ -183,9 +186,10 @@ If you use swarmstate in academic work, please cite it:
 }
 ```
 
-> The DOI is minted when the first release is archived on Zenodo; replace the
-> placeholder in this block, in [`docs/index.md`](docs/index.md) and in
-> [`CITATION.cff`](CITATION.cff) once it exists.
+<sub>The DOI is minted when the first release is archived on Zenodo. Replacing
+`10.5281/zenodo.XXXXXXXX` here, in [`docs/index.md`](docs/index.md) and in
+[`CITATION.cff`](CITATION.cff) is all it takes — the placeholder is deliberate, so that
+nothing cites an identifier that does not resolve.</sub>
 
 ## License
 
