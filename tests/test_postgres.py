@@ -80,11 +80,17 @@ def test_snapshot_restore():
 
 
 def test_msgpack_wire_format_is_standard():
+    """Any Postgres + msgpack consumer can read the table, without swarmstate."""
     import msgpack
+    import psycopg
 
     s = make_store()
     s.set("ns", "k", {"hello": "world", "n": 7})
-    row = s._conn.execute(f"SELECT v FROM {s.table} WHERE ns='ns' AND k='k'").fetchone()
+
+    # A connection of our own, not the store's: with a pool there is no single
+    # connection to borrow, and reading it from outside is the actual claim.
+    with psycopg.connect(DSN) as conn:
+        row = conn.execute(f"SELECT v FROM {s.table} WHERE ns='ns' AND k='k'").fetchone()
     assert msgpack.unpackb(bytes(row[0]), raw=False) == {"hello": "world", "n": 7}
 
 
