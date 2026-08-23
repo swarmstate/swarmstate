@@ -9,7 +9,7 @@ by every later one. Changes that would break that are not shipped in a minor rel
 the wire format is pinned by byte-for-byte tests against an independent msgpack
 implementation at every width boundary.
 
-## [0.11.0] - 2026-08-21
+## [0.11.0] - 2026-08-23
 
 ### Fixed
 
