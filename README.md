@@ -1,5 +1,9 @@
 # swarmstate
 
+[![PyPI](https://img.shields.io/pypi/v/swarmstate)](https://pypi.org/project/swarmstate/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22067264.svg)](https://doi.org/10.5281/zenodo.22067264)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 > Drop-in state backend for LangGraph, CrewAI & custom agent loops - Rust core, framework-agnostic, built for production.
 
 > **Constant-time checkpoint reads** — `get_tuple` stays at ~7 µs whether a thread holds 5 or
@@ -172,7 +176,8 @@ pytest -q                     # Python API tests
 If you use `swarmstate` in academic work, please cite it. GitHub's **"Cite this
 repository"** button (from [`CITATION.cff`](CITATION.cff)) produces ready-made APA and
 BibTeX entries. To cite the archived software release, use its Zenodo DOI
-(`10.5281/zenodo.XXXXXXXX`):
+([10.5281/zenodo.22067264](https://doi.org/10.5281/zenodo.22067264)) — it always resolves
+to the latest version:
 
 ```bibtex
 @software{salmeron_swarmstate,
@@ -181,7 +186,7 @@ BibTeX entries. To cite the archived software release, use its Zenodo DOI
                systems with a Rust core},
   year      = {2026},
   publisher = {Zenodo},
-  doi       = {10.5281/zenodo.XXXXXXXX},
+  doi       = {10.5281/zenodo.22067264},
   url       = {https://github.com/swarmstate/swarmstate}
 }
 ```

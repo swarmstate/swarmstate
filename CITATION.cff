@@ -1,10 +1,9 @@
 # Citation metadata. GitHub reads this file to render the "Cite this repository"
 # button, and it is what Zenodo uses to fill in the archive record.
 #
-# TODO before the first release: archive the repository on Zenodo (enable the
-# GitHub integration, then publish a release) and paste the concept DOI it mints
-# into the `doi:` field below and into the BibTeX block in README.md and
-# docs/index.md. Until then the DOI is deliberately absent rather than a guess.
+# `doi` below is the Zenodo *concept* DOI: it always resolves to the latest
+# archived version, which is what a citation should point at. Each release also
+# gets its own version DOI (v0.11.0 is 10.5281/zenodo.22067265).
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
@@ -31,4 +30,4 @@ keywords:
   - langgraph
   - crewai
   - rust
-# doi: 10.5281/zenodo.XXXXXXXX
+doi: 10.5281/zenodo.22067264
