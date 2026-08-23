@@ -7,7 +7,7 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
-title: "swarmstate"
+title: "swarmstate: A state and checkpointing backend for multi-agent systems with a Rust core"
 abstract: >-
   A state and checkpointing backend for multi-agent systems, with a Rust core and
   a Python API. Drop-in for LangGraph and CrewAI: constant-time checkpoint reads,
@@ -15,13 +15,15 @@ abstract: >-
 authors:
   - family-names: "Salmeron"
     given-names: "Jose L."
+    orcid: "https://orcid.org/0000-0001-7811-3716"
+    affiliation: "CUNEF Universidad"
 # CFF 1.2.0 has no `year`: the release date and version carry that, and Zenodo
 # reads them straight from here. Bump both when tagging a release.
 version: 0.11.0
 date-released: "2026-08-23"
 license: MIT
 repository-code: "https://github.com/swarmstate/swarmstate"
-url: "https://swarmstate.github.io/swarmstate/"
+url: "https://swarmstate.github.io/"
 keywords:
   - multi-agent systems
   - agents
