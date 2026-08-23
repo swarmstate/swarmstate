@@ -11,7 +11,7 @@ import pytest
 
 pytest.importorskip("msgpack")
 
-from swarmstate.backends.postgres import PostgresStore  # noqa: E402
+from swarmstate.backends.postgres import PostgresStore
 
 
 class RecordingCursor:

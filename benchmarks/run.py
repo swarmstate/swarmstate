@@ -191,7 +191,7 @@ def bench_concurrency(thread_counts: list[int], ops: int) -> dict:
     for n in thread_counts:
         store = ss.Store()
 
-        def store_worker(tid):
+        def store_worker(tid, store=store):
             ns = f"t{tid}"
             for i in range(ops):
                 store.set(ns, str(i), payload)
@@ -208,7 +208,7 @@ def bench_concurrency(thread_counts: list[int], ops: int) -> dict:
         d: dict = {}
         lock = threading.Lock()
 
-        def dict_worker(tid):
+        def dict_worker(tid, d=d, lock=lock):
             for i in range(ops):
                 with lock:
                     d[(tid, i)] = payload

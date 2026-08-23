@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("msgpack")
 
-from swarmstate.backends.disk import DiskStore  # noqa: E402
+from swarmstate.backends.disk import DiskStore
 
 
 def test_set_get_roundtrip_types(tmp_path):
@@ -113,12 +113,14 @@ def test_concurrent_threads_share_the_file(tmp_path):
 
 def test_restore_is_atomic(tmp_path):
     """A failed restore must not leave the table wiped."""
+    import sqlite3
+
     s = DiskStore(str(tmp_path / "atomic.db"))
     s.set("ns", "a", {"v": 1})
     snap = s.snapshot()
     snap._rows = [("ns", "a", b"\x01"), ("ns", "a", b"\x02")]  # duplicate PK -> fails
 
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.IntegrityError):
         s.restore(snap)
     assert s.get("ns", "a") == {"v": 1}
 

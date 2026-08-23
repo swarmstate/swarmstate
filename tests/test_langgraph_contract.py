@@ -10,14 +10,14 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from langgraph.checkpoint.base import (  # noqa: E402
+from langgraph.checkpoint.base import (
     empty_checkpoint,
     get_checkpoint_id,
 )
-from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
+from langgraph.checkpoint.memory import InMemorySaver
 
-import swarmstate as ss  # noqa: E402
-from swarmstate.integrations.langgraph import SwarmStateSaver  # noqa: E402
+import swarmstate as ss
+from swarmstate.integrations.langgraph import SwarmStateSaver
 
 
 @pytest.fixture(params=["memory", "disk"])
