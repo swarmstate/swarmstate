@@ -7,10 +7,10 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from langgraph.graph import END, START, StateGraph  # noqa: E402
+from langgraph.graph import END, START, StateGraph
 
-import swarmstate as ss  # noqa: E402
-from swarmstate.integrations.langgraph import SwarmStateSaver  # noqa: E402
+import swarmstate as ss
+from swarmstate.integrations.langgraph import SwarmStateSaver
 
 
 class State(TypedDict):
