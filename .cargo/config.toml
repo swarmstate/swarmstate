@@ -1,0 +1,15 @@
+# Apple targets: strip debug info in the linker, not with rustc's strip step.
+#
+# In release builds rustc strips debug info (`strip = "debuginfo"`) after linking,
+# with the llvm-objcopy bundled as `rust-objcopy`. On Mach-O that rewrite drops
+# the padding ld puts between the 4-byte indirect symbol table and the string
+# table, so whenever the extension imports an odd number of symbols the string
+# table ends up 4 bytes off an 8-byte boundary. macOS 27's dyld refuses such an
+# image ("mis-aligned LINKEDIT string pool") — and since the parity moves with
+# any code change, any release could ship a wheel that does not import.
+#
+# `-Wl,-S` has ld leave the debug info (STABS/DWARF) out of the output itself,
+# which is what the strip step was for, and `strip=none` skips that step. These
+# flags are ignored when RUSTFLAGS is set in the environment.
+[target.'cfg(target_vendor = "apple")']
+rustflags = ["-C", "strip=none", "-C", "link-arg=-Wl,-S"]
