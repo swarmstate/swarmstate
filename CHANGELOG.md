@@ -9,7 +9,7 @@ by every later one. Changes that would break that are not shipped in a minor rel
 the wire format is pinned by byte-for-byte tests against an independent msgpack
 implementation at every width boundary.
 
-## [Unreleased]
+## [0.12.0] - 2026-10-29
 
 ### Added
 
@@ -188,4 +188,5 @@ Measured on Apple Silicon, Python 3.14, release build; reproduce with `benchmark
 
 See the git history; releases before this changelog was started are not itemized here.
 
+[0.12.0]: https://github.com/swarmstate/swarmstate/releases/tag/v0.12.0
 [0.11.0]: https://github.com/swarmstate/swarmstate/releases/tag/v0.11.0
