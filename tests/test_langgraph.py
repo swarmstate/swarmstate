@@ -231,3 +231,37 @@ def test_put_writes_fallback_without_set_many():
     from swarmstate.integrations.langgraph import _writes_ns
 
     assert len(saver.store.keys(_writes_ns("w3", "", "cp-1"))) == 2
+
+
+def test_handoff_router_drives_conditional_edges():
+    """A HandoffGraph routes a real LangGraph graph, with no Python routing code."""
+    from dataclasses import dataclass
+
+    from swarmstate.integrations.langgraph import handoff_router
+
+    rules = ss.HandoffGraph()
+    rules.add_edge("triage", "billing", when="category in ['billing', 'refund']")
+    rules.add_edge("triage", "support", when="category not in ['spam']")
+
+    @dataclass
+    class Ticket:
+        category: str
+        handled_by: str = ""
+
+    b = StateGraph(Ticket)
+    b.add_node("triage", lambda s: {})
+    b.add_node("billing", lambda s: {"handled_by": "billing"})
+    b.add_node("support", lambda s: {"handled_by": "support"})
+    b.add_edge(START, "triage")
+    b.add_conditional_edges("triage", handoff_router(rules, "triage"), ["billing", "support", END])
+    b.add_edge("billing", END)
+    b.add_edge("support", END)
+    g = b.compile(checkpointer=SwarmStateSaver())
+
+    def handled(category, thread):
+        cfg = {"configurable": {"thread_id": thread}}
+        return g.invoke(Ticket(category=category), cfg)["handled_by"]
+
+    assert handled("refund", "a") == "billing"
+    assert handled("howto", "b") == "support"
+    assert handled("spam", "c") == ""  # no rule matched: the default, END

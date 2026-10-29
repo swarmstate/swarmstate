@@ -29,6 +29,7 @@ from typing import Any, Optional, cast
 
 import msgpack
 
+from ._prefix import prefix_upper_bound
 from ._snapshot import CopySnapshot, SnapshotMeta
 
 
@@ -177,13 +178,32 @@ class DiskStore:
         cur = self._connect().execute("DELETE FROM kv WHERE ns = ? AND k = ?", (namespace, key))
         return cur.rowcount > 0
 
+    def delete_many(self, pairs: list[tuple[str, str]]) -> int:
+        """Delete many pairs in one transaction; returns how many existed."""
+        if not pairs:
+            return 0
+        with self._transaction() as conn:
+            # sqlite3 sums executemany's per-statement row counts.
+            return conn.executemany("DELETE FROM kv WHERE ns = ? AND k = ?", pairs).rowcount
+
+    def delete_namespace(self, namespace: str) -> int:
+        """Delete every key in ``namespace``; returns how many were removed."""
+        cur = self._connect().execute("DELETE FROM kv WHERE ns = ?", (namespace,))
+        return cur.rowcount
+
     def keys(self, namespace: str, prefix: Optional[str] = None) -> list[str]:
         conn = self._connect()
+        upper = None if prefix is None else prefix_upper_bound(prefix)
         if prefix is None:
             rows = conn.execute("SELECT k FROM kv WHERE ns = ?", (namespace,)).fetchall()
+        elif upper is not None:
+            # A range, not LIKE or substr: LIKE would read a '_' or '%' inside a
+            # thread id as a wildcard, and substr hides the key from the index.
+            rows = conn.execute(
+                "SELECT k FROM kv WHERE ns = ? AND k >= ? AND k < ?",
+                (namespace, prefix, upper),
+            ).fetchall()
         else:
-            # substr, not LIKE: keys carry user data, and LIKE would read a '_'
-            # or '%' inside a thread id as a wildcard.
             rows = conn.execute(
                 "SELECT k FROM kv WHERE ns = ? AND substr(k, 1, ?) = ?",
                 (namespace, len(prefix), prefix),
@@ -197,8 +217,14 @@ class DiskStore:
 
     def namespaces(self, prefix: Optional[str] = None) -> list[str]:
         conn = self._connect()
+        upper = None if prefix is None else prefix_upper_bound(prefix)
         if prefix is None:
             rows = conn.execute("SELECT DISTINCT ns FROM kv").fetchall()
+        elif upper is not None:
+            # An index seek on (ns, k); the substr form below scanned the table.
+            rows = conn.execute(
+                "SELECT DISTINCT ns FROM kv WHERE ns >= ? AND ns < ?", (prefix, upper)
+            ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT DISTINCT ns FROM kv WHERE substr(ns, 1, ?) = ?",

@@ -86,6 +86,70 @@ def test_invalid_on_cycle_and_condition():
         g.add_edge("a", "b", when="(unbalanced")
 
 
+def test_huge_conditions_never_crash_the_process():
+    # Both used to overflow the native stack (a segfault, not an exception).
+    g = ss.HandoffGraph()
+    g.add_edge("a", "b", when=" and ".join(["x == 1"] * 300_000))
+    assert g.route("a", {"x": 1}) == "b"
+    with pytest.raises(ValueError, match="nested too deeply"):
+        g.add_edge("a", "c", when="not " * 300_000 + "x")
+
+
+def test_list_literals_and_not_in():
+    g = ss.HandoffGraph()
+    g.add_edge("triage", "money", when="category in ['billing', 'refund']")
+    g.add_edge("triage", "support", when="category not in ['spam', 'abuse']")
+    g.add_edge("triage", "trash")
+
+    assert g.route("triage", {"category": "refund"}) == "money"
+    assert g.route("triage", {"category": "howto"}) == "support"
+    assert g.route("triage", {"category": "spam"}) == "trash"
+    with pytest.raises(ValueError, match="condition"):
+        g.add_edge("triage", "x", when="category in ['a' 'b']")
+
+
+def test_routes_on_object_states():
+    # LangGraph states are often dataclasses or Pydantic models, not dicts.
+    from collections import UserDict
+    from dataclasses import dataclass
+
+    @dataclass
+    class User:
+        tier: str
+
+    @dataclass
+    class State:
+        category: str
+        user: User
+        _secret: str = "billing"
+
+    g = ss.HandoffGraph()
+    g.add_edge("t", "vip", when="user.tier == 'gold'")
+    g.add_edge("t", "billing", when="category == 'billing'")
+    g.add_edge("t", "leak", when="_secret == 'billing'")  # private: never readable
+
+    assert g.route("t", State("billing", User("gold"))) == "vip"
+    assert g.route("t", State("billing", User("free"))) == "billing"
+    assert g.route("t", State("other", User("free"))) is None
+    # Any Mapping, not only dict; plain values have no fields to walk into.
+    assert g.route("t", UserDict({"category": "billing"})) == "billing"
+    assert g.route("t", {"category": "billing", "user": "gold"}) == "billing"
+
+
+def test_routes_on_pydantic_states():
+    pydantic = pytest.importorskip("pydantic")
+
+    class State(pydantic.BaseModel):
+        category: str
+        tags: list[str] = pydantic.Field(default_factory=list)
+
+    g = ss.HandoffGraph()
+    g.add_edge("t", "urgent", when="'urgent' in tags")
+    g.add_edge("t", "billing", when="category == 'billing'")
+    assert g.route("t", State(category="x", tags=["urgent"])) == "urgent"
+    assert g.route("t", State(category="billing")) == "billing"
+
+
 def test_introspection():
     g = ss.HandoffGraph()
     g.add_edge("triage", "billing", when="category == 'billing'")

@@ -6,6 +6,8 @@ pending writes (+ idempotency), nested checkpoint namespaces, and behavioural
 equivalence with the reference InMemorySaver.
 """
 
+import collections
+
 import pytest
 
 pytest.importorskip("langgraph")
@@ -17,7 +19,12 @@ from langgraph.checkpoint.base import (
 from langgraph.checkpoint.memory import InMemorySaver
 
 import swarmstate as ss
-from swarmstate.integrations.langgraph import SwarmStateSaver
+from swarmstate.integrations.langgraph import (
+    _LATEST_NS,
+    SwarmStateSaver,
+    _ckpt_ns,
+    _latest_key,
+)
 
 
 @pytest.fixture(params=["memory", "disk"])
@@ -112,6 +119,71 @@ def test_list_order_limit_before_and_filter():
     assert step2 == ["2"]
 
 
+def test_list_decodes_only_what_it_returns(monkeypatch):
+    s = SwarmStateSaver()
+    put_seq(s, "t", [("1", {"x": 1}), ("2", {"x": 2}), ("3", {"x": 3})])
+
+    # A requested id is read directly; a missing one yields nothing.
+    assert [get_checkpoint_id(t.config) for t in s.list(cfg("t", cid="2"))] == ["2"]
+    assert list(s.list(cfg("t", cid="9"))) == []
+    assert list(s.list(cfg("t", cid="2"), before=cfg("t", cid="2"))) == []
+
+    # The metadata filter runs before the checkpoint and its writes are decoded.
+    built = []
+    real_build = s._build_tuple
+
+    def counting_build(*args, **kwargs):
+        built.append(args[2])
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(s, "_build_tuple", counting_build)
+    step2 = [get_checkpoint_id(t.config) for t in s.list(cfg("t"), filter={"step": 2})]
+    assert step2 == ["2"]
+    assert built == ["2"]
+
+
+class _CallCounter:
+    """Proxies a store, counting calls per method."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.calls = collections.Counter()
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def counted(*args, **kwargs):
+            self.calls[name] += 1
+            return attr(*args, **kwargs)
+
+        return counted
+
+
+def test_resume_from_the_pointer_reads_two_rows():
+    store = _CallCounter(ss.Store())
+    s = SwarmStateSaver(store)
+    put_seq(s, "t", [("1", {"x": 1}), ("2", {"x": 2})])
+    store.calls.clear()
+
+    assert s.get_tuple(cfg("t")).checkpoint["id"] == "2"
+    # The pointer, then the checkpoint it names. Reading the checkpoint is the
+    # existence check; a separate contains() was one more round-trip on Redis.
+    assert store.calls["get"] == 2
+    assert store.calls["contains"] == 0
+
+
+def test_dangling_pointer_falls_back_to_the_newest_checkpoint():
+    s = SwarmStateSaver()
+    put_seq(s, "t", [("1", {"x": 1}), ("2", {"x": 2})])
+    s.store.delete(_ckpt_ns("t", ""), "2")
+
+    assert s.get_tuple(cfg("t")).checkpoint["id"] == "1"
+    # ...and the pointer is republished, so the next resume takes the fast path.
+    assert s.store.get(_LATEST_NS, _latest_key("t", "")) == "1"
+
+
 def test_pending_writes_and_idempotency():
     s = SwarmStateSaver()
     put_seq(s, "t", [("1", {"x": 1})])
@@ -126,6 +198,19 @@ def test_pending_writes_and_idempotency():
         ("task1", "messages", "a"),
         ("task1", "messages", "b"),
     ]
+
+
+def test_pending_writes_keep_their_order_past_ten():
+    # Write indices are stored inside string keys; ordering them as text put
+    # write 10 before write 2 and reordered the task's writes on resume.
+    s = SwarmStateSaver()
+    put_seq(s, "t", [("1", {"x": 1})])
+    c = cfg("t", cid="1")
+
+    s.put_writes(c, [("messages", i) for i in range(12)], task_id="task1")
+
+    pending = s.get_tuple(c).pending_writes
+    assert [val for _tid, _ch, val in pending] == list(range(12))
 
 
 def test_nested_checkpoint_ns_isolated():

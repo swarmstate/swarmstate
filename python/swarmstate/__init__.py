@@ -13,14 +13,18 @@ from __future__ import annotations
 
 from . import _core
 from ._core import HandoffGraph, Snapshot, Store, dumps, loads
+from .portability import copy_store, dump_store, load_store
 
 __all__ = [
     "HandoffGraph",
     "Snapshot",
     "Store",
     "__version__",
+    "copy_store",
     "core_version",
+    "dump_store",
     "dumps",
+    "load_store",
     "loads",
 ]
 

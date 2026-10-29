@@ -64,6 +64,60 @@ def test_upsert_replaces():
     assert len(s) == 1
 
 
+def _prefix_plan(table):
+    import psycopg
+
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute("SET enable_seqscan = off")  # tiny tables would scan anyway
+        rows = conn.execute(
+            f"EXPLAIN SELECT DISTINCT ns FROM {table} WHERE starts_with(ns, %s)", ("ck",)
+        ).fetchall()
+    return " ".join(r[0] for r in rows)
+
+
+def test_prefix_filters_seek_the_primary_key():
+    # New tables are COLLATE "C", which lets the planner turn starts_with into a
+    # range on the primary key; under the database collation it scans the table.
+    if psycopg_server_version() < 150000:
+        pytest.skip("starts_with uses btree indexes from Postgres 15")
+    s = make_store()
+    assert "Index Cond" in _prefix_plan(s.table)
+
+    # A table from an older version still answers prefixes correctly.
+    import psycopg
+
+    table = f"kv_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(DSN, autocommit=True) as conn:
+        conn.execute(
+            f"CREATE TABLE {table} (ns text NOT NULL, k text NOT NULL, "
+            "v bytea NOT NULL, PRIMARY KEY (ns, k))"
+        )
+    legacy = PostgresStore(DSN, table=table)
+    legacy.set_many([("ck\x1fa\x1f", "task-1", 1), ("ck\x1fb\x1f", "x", 2), ("wr", "y", 3)])
+    assert sorted(legacy.namespaces(prefix="ck\x1f")) == ["ck\x1fa\x1f", "ck\x1fb\x1f"]
+    assert legacy.keys("ck\x1fa\x1f", prefix="task-") == ["task-1"]
+
+
+def psycopg_server_version():
+    import psycopg
+
+    with psycopg.connect(DSN) as conn:
+        return conn.info.server_version
+
+
+def test_set_many_is_all_or_nothing():
+    # Under autocommit each row used to commit on its own, so a batch that
+    # failed partway kept the rows before the failure. Postgres text cannot
+    # hold NUL, which makes the second row fail.
+    import psycopg
+
+    s = make_store()
+    with pytest.raises(psycopg.DataError):
+        s.set_many([("n", "first", 1), ("n", "bad\x00key", 2)])
+    assert not s.contains("n", "first")
+    assert len(s) == 0
+
+
 def test_snapshot_restore():
     s = make_store()
     s.set("wf", "a", {"step": 1})

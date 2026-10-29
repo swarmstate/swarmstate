@@ -98,6 +98,14 @@ class Store:
         """Delete ``(namespace, key)``; return True if a value was removed."""
         ...
 
+    def delete_many(self, pairs: list[tuple[str, str]]) -> int:
+        """Delete many ``(namespace, key)`` pairs; return how many existed."""
+        ...
+
+    def delete_namespace(self, namespace: str) -> int:
+        """Delete every key in ``namespace``; return how many were removed."""
+        ...
+
     def keys(self, namespace: str, prefix: Optional[str] = None) -> list[str]:
         """Keys in ``namespace``, or only those starting with ``prefix``."""
         ...
@@ -144,8 +152,9 @@ class HandoffGraph:
     """A deterministic, LLM-free routing graph over named nodes.
 
     Edges carry an optional ``when`` condition written in a small, safe
-    mini-language (never Python ``eval``): literals, dotted state paths,
-    ``== != < <= > >=``, ``in``, ``and``/``or``/``not`` and parentheses.
+    mini-language (never Python ``eval``): literals, list literals
+    (``['billing', 'refund']``), dotted state paths, ``== != < <= > >=``,
+    ``in`` / ``not in``, ``and``/``or``/``not`` and parentheses.
     """
 
     def __init__(self, on_cycle: str = "error") -> None:
@@ -166,12 +175,13 @@ class HandoffGraph:
         """
         ...
 
-    def route(self, node: str, state: Optional[dict[str, Any]] = None) -> Optional[str]:
+    def route(self, node: str, state: Any = None) -> Optional[str]:
         """Return the next node from ``node`` given ``state``.
 
         Evaluates outgoing edges in insertion order and returns the first whose
         condition holds (an edge with no condition always matches); ``None`` if
-        none match.
+        none match. ``state`` is a dict, any other mapping, or an object whose
+        public attributes are its fields (a dataclass or Pydantic model).
         """
         ...
 

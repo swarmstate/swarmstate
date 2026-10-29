@@ -63,6 +63,56 @@ def test_snapshot_restore():
     assert len(s) == 1
 
 
+def _drop_connection_on_execute(store, monkeypatch, calls=None):
+    """Make every pipeline the store opens fail at EXEC, as a dropped link would."""
+    real_pipeline = store._r.pipeline
+
+    def pipeline(*args, **kwargs):
+        if calls is not None:
+            calls.append(kwargs)
+        pipe = real_pipeline(*args, **kwargs)
+
+        def execute(*_a, **_k):
+            raise ConnectionError("connection dropped")
+
+        pipe.execute = execute
+        return pipe
+
+    monkeypatch.setattr(store._r, "pipeline", pipeline)
+
+
+def test_failed_restore_leaves_the_data_alone(monkeypatch):
+    # restore() used to clear the store on its own first, so a refill that
+    # failed left it empty.
+    s = make_store()
+    s.set("wf", "a", {"step": 1})
+    snap = s.snapshot()
+    s.set("wf", "a", {"step": 2})
+    s.set("wf", "b", {"step": 9})
+
+    _drop_connection_on_execute(s, monkeypatch)
+    with pytest.raises(ConnectionError):
+        s.restore(snap)
+    monkeypatch.undo()
+
+    assert s.get("wf", "a") == {"step": 2}
+    assert s.get("wf", "b") == {"step": 9}
+
+
+def test_set_many_is_one_transaction(monkeypatch):
+    # A checkpoint and its latest pointer go out in one set_many; as MULTI/EXEC
+    # a dropped connection applies neither instead of just the first.
+    s = make_store()
+    calls = []
+    _drop_connection_on_execute(s, monkeypatch, calls)
+    with pytest.raises(ConnectionError):
+        s.set_many([("ck", "1", {"x": 1}), ("lt", "t", "1")])
+    monkeypatch.undo()
+
+    assert calls == [{"transaction": True}]
+    assert len(s) == 0
+
+
 def test_msgpack_wire_format_is_standard():
     """Values are plain msgpack — any msgpack reader can decode them."""
     import msgpack

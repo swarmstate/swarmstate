@@ -6,7 +6,8 @@
 //!
 //! - literals: strings (`'x'`/`"x"`), ints, floats, `true`/`false`, `null`
 //! - state access: identifiers with dotted paths (`data.user.role`)
-//! - comparisons: `== != < <= > >=`, and membership `in`
+//! - list literals: `['billing', 'refund']`
+//! - comparisons: `== != < <= > >=`, and membership `in` / `not in`
 //! - logic: `and`, `or`, `not`, and parentheses
 //!
 //! Evaluation is total: type mismatches yield `false` rather than raising, so
@@ -36,6 +37,9 @@ enum Tok {
     Ge,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    Comma,
     Dot,
 }
 
@@ -47,10 +51,14 @@ pub enum Expr {
     Float(f64),
     Bool(bool),
     Null,
+    List(Vec<Expr>),
     Var(Vec<String>),
     Not(Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Or(Box<Expr>, Box<Expr>),
+    // N-ary rather than binary: `a and b and c ...` is one flat node. A binary
+    // chain grew one tree level per operand, so a long enough condition overflowed
+    // the native stack in every recursive walk (eval, collect_paths, Drop).
+    And(Vec<Expr>),
+    Or(Vec<Expr>),
     Cmp(CmpOp, Box<Expr>, Box<Expr>),
 }
 
@@ -63,6 +71,7 @@ pub enum CmpOp {
     Gt,
     Ge,
     In,
+    NotIn,
 }
 
 // ------------------------------------------------------------------ lexer
@@ -84,6 +93,18 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
             }
             ')' => {
                 toks.push(Tok::RParen);
+                i += 1;
+            }
+            '[' => {
+                toks.push(Tok::LBracket);
+                i += 1;
+            }
+            ']' => {
+                toks.push(Tok::RBracket);
+                i += 1;
+            }
+            ',' => {
+                toks.push(Tok::Comma);
                 i += 1;
             }
             '.' => {
@@ -244,26 +265,37 @@ impl Parser {
         if depth > MAX_DEPTH {
             return Err("condition nested too deeply".to_string());
         }
-        let mut left = self.parse_and(depth + 1)?;
+        let first = self.parse_and(depth + 1)?;
+        if !matches!(self.peek(), Some(Tok::Or)) {
+            return Ok(first);
+        }
+        let mut terms = vec![first];
         while matches!(self.peek(), Some(Tok::Or)) {
             self.pos += 1;
-            let right = self.parse_and(depth + 1)?;
-            left = Expr::Or(Box::new(left), Box::new(right));
+            terms.push(self.parse_and(depth + 1)?);
         }
-        Ok(left)
+        Ok(Expr::Or(terms))
     }
 
     fn parse_and(&mut self, depth: usize) -> Result<Expr, String> {
-        let mut left = self.parse_not(depth + 1)?;
+        let first = self.parse_not(depth + 1)?;
+        if !matches!(self.peek(), Some(Tok::And)) {
+            return Ok(first);
+        }
+        let mut terms = vec![first];
         while matches!(self.peek(), Some(Tok::And)) {
             self.pos += 1;
-            let right = self.parse_not(depth + 1)?;
-            left = Expr::And(Box::new(left), Box::new(right));
+            terms.push(self.parse_not(depth + 1)?);
         }
-        Ok(left)
+        Ok(Expr::And(terms))
     }
 
     fn parse_not(&mut self, depth: usize) -> Result<Expr, String> {
+        // `not` recurses on itself, so it has to check the budget too: a run of
+        // `not not not ...` never reaches the check in parse_primary otherwise.
+        if depth > MAX_DEPTH {
+            return Err("condition nested too deeply".to_string());
+        }
         if matches!(self.peek(), Some(Tok::Not)) {
             self.pos += 1;
             let inner = self.parse_not(depth + 1)?;
@@ -282,6 +314,11 @@ impl Parser {
             Some(Tok::Gt) => CmpOp::Gt,
             Some(Tok::Ge) => CmpOp::Ge,
             Some(Tok::In) => CmpOp::In,
+            // `not in` is two tokens; a lone `not` here is a syntax error, as before.
+            Some(Tok::Not) if matches!(self.toks.get(self.pos + 1), Some(Tok::In)) => {
+                self.pos += 1;
+                CmpOp::NotIn
+            }
             _ => return Ok(left),
         };
         self.pos += 1;
@@ -306,6 +343,24 @@ impl Parser {
             Some(Tok::Float(f)) => Ok(Expr::Float(f)),
             Some(Tok::Bool(b)) => Ok(Expr::Bool(b)),
             Some(Tok::Null) => Ok(Expr::Null),
+            Some(Tok::LBracket) => {
+                // Items are primaries (literals, paths, nested lists); a trailing
+                // comma is accepted. Nesting goes through the same depth budget.
+                let mut items = Vec::new();
+                loop {
+                    if matches!(self.peek(), Some(Tok::RBracket)) {
+                        self.pos += 1;
+                        break;
+                    }
+                    items.push(self.parse_primary(depth + 1)?);
+                    match self.next() {
+                        Some(Tok::Comma) => {}
+                        Some(Tok::RBracket) => break,
+                        _ => return Err("expected ',' or ']' in list".to_string()),
+                    }
+                }
+                Ok(Expr::List(items))
+            }
             Some(Tok::Ident(first)) => {
                 let mut path = vec![first];
                 while matches!(self.peek(), Some(Tok::Dot)) {
@@ -423,7 +478,12 @@ pub fn collect_paths(expr: &Expr, out: &mut Vec<Vec<String>>) {
             }
         }
         Expr::Not(inner) => collect_paths(inner, out),
-        Expr::And(a, b) | Expr::Or(a, b) | Expr::Cmp(_, a, b) => {
+        Expr::And(terms) | Expr::Or(terms) | Expr::List(terms) => {
+            for term in terms {
+                collect_paths(term, out);
+            }
+        }
+        Expr::Cmp(_, a, b) => {
             collect_paths(a, out);
             collect_paths(b, out);
         }
@@ -455,22 +515,12 @@ fn eval(expr: &Expr, state: &Value) -> Value {
         Expr::Float(f) => Value::F64(*f),
         Expr::Bool(b) => Value::Boolean(*b),
         Expr::Null => Value::Nil,
+        Expr::List(items) => Value::Array(items.iter().map(|e| eval(e, state)).collect()),
         Expr::Var(path) => lookup(state, path).cloned().unwrap_or(Value::Nil),
         Expr::Not(e) => Value::Boolean(!truthy(&eval(e, state))),
-        Expr::And(a, b) => {
-            if !truthy(&eval(a, state)) {
-                Value::Boolean(false)
-            } else {
-                Value::Boolean(truthy(&eval(b, state)))
-            }
-        }
-        Expr::Or(a, b) => {
-            if truthy(&eval(a, state)) {
-                Value::Boolean(true)
-            } else {
-                Value::Boolean(truthy(&eval(b, state)))
-            }
-        }
+        // Short-circuits left to right, as the binary form did.
+        Expr::And(terms) => Value::Boolean(terms.iter().all(|t| truthy(&eval(t, state)))),
+        Expr::Or(terms) => Value::Boolean(terms.iter().any(|t| truthy(&eval(t, state)))),
         Expr::Cmp(op, a, b) => {
             let av = eval(a, state);
             let bv = eval(b, state);
@@ -478,6 +528,9 @@ fn eval(expr: &Expr, state: &Value) -> Value {
                 CmpOp::Eq => values_equal(&av, &bv),
                 CmpOp::Ne => !values_equal(&av, &bv),
                 CmpOp::In => is_member(&av, &bv),
+                // Exactly `not (a in b)`: also true when `b` is missing or not a
+                // container, where `in` is false.
+                CmpOp::NotIn => !is_member(&av, &bv),
                 other => ordering_true(*other, &av, &bv),
             };
             Value::Boolean(res)
@@ -564,10 +617,53 @@ mod tests {
     }
 
     #[test]
+    fn long_and_or_chains_stay_flat() {
+        // Used to build one tree level per operand and overflow the stack.
+        let s = state(vec![("x", Value::Integer(1.into()))]);
+        let all = vec!["x == 1"; 300_000].join(" and ");
+        assert!(check(&all, &s));
+        let any = format!("{} or x == 1", vec!["x == 2"; 300_000].join(" or "));
+        assert!(check(&any, &s));
+        // Precedence is unchanged: `and` binds tighter than `or`.
+        assert!(check("x == 2 and x == 2 or x == 1", &s));
+        assert!(!check("x == 2 and (x == 2 or x == 1)", &s));
+    }
+
+    #[test]
+    fn long_not_chain_is_an_error_not_a_crash() {
+        let src = format!("{}x", "not ".repeat(300_000));
+        assert!(parse(&src).is_err());
+        assert!(parse("not not x").is_ok());
+    }
+
+    #[test]
+    fn list_literals_and_not_in() {
+        let s = state(vec![
+            ("category", Value::String("refund".into())),
+            ("priority", Value::Integer(2.into())),
+        ]);
+        assert!(check("category in ['billing', 'refund']", &s));
+        assert!(!check("category in ['billing', 'sales',]", &s)); // trailing comma
+        assert!(check("priority in [1, 2.0, 3]", &s)); // numeric equality across types
+        assert!(!check("category in []", &s));
+        assert!(check("category not in ['billing']", &s));
+        assert!(!check("category not in ['refund']", &s));
+        assert!(check("[1, 2] in [[1, 2], [3]]", &s)); // nested lists compare by value
+                                                       // `not in` is `not (a in b)`, including over a missing container.
+        assert!(check("category not in missing", &s));
+        assert!(check("not category in ['billing']", &s));
+    }
+
+    #[test]
     fn syntax_errors() {
         assert!(parse("category = 'x'").is_err()); // single '='
         assert!(parse("").is_err());
         assert!(parse("(a == 1").is_err()); // unbalanced
         assert!(parse("a == ").is_err());
+        assert!(parse("a in [1, 2").is_err()); // unclosed list
+        assert!(parse("a in [1 2]").is_err()); // missing comma
+        assert!(parse("a in [,]").is_err());
+        assert!(parse("a not b").is_err()); // `not` without `in` after an operand
+        assert!(parse(&format!("a in {}1{}", "[".repeat(200), "]".repeat(200))).is_err());
     }
 }

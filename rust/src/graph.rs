@@ -8,9 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyAttributeError, PyKeyError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyMapping, PyString, PyTuple};
 use rmpv::Value;
 
 use crate::codec;
@@ -47,22 +47,57 @@ fn drop_covered_paths(paths: &mut Vec<Vec<String>>) {
     *paths = kept;
 }
 
-/// Walk `state` down `path`, returning the value there if every step is a dict.
+/// Walk `state` down `path`, returning the value there if every step resolves.
 fn resolve_path<'py>(
-    state: &Bound<'py, PyDict>,
+    state: &Bound<'py, PyAny>,
     path: &[String],
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
-    let mut current: Bound<'py, PyAny> = state.clone().into_any();
+    let mut current = state.clone();
     for segment in path {
-        let Ok(dict) = current.cast::<PyDict>() else {
-            return Ok(None);
-        };
-        match dict.get_item(segment.as_str())? {
+        match child(&current, segment)? {
             Some(value) => current = value,
             None => return Ok(None),
         }
     }
     Ok(Some(current))
+}
+
+/// One step of a state path: a key of a mapping, else a public attribute.
+///
+/// Attributes are what LangGraph states that are dataclasses or Pydantic models
+/// hold their fields in. Only public ones: a condition must not reach dunders or
+/// private state. Plain values (strings, numbers, lists...) have no fields, so a
+/// path through one is simply missing, as it always was.
+fn child<'py>(obj: &Bound<'py, PyAny>, segment: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        return dict.get_item(segment);
+    }
+    if obj.is_none()
+        || obj.is_instance_of::<PyString>()
+        || obj.is_instance_of::<PyBytes>()
+        || obj.is_instance_of::<PyInt>()
+        || obj.is_instance_of::<PyFloat>()
+        || obj.is_instance_of::<PyList>()
+        || obj.is_instance_of::<PyTuple>()
+    {
+        return Ok(None);
+    }
+    let py = obj.py();
+    if let Ok(mapping) = obj.cast::<PyMapping>() {
+        return match mapping.get_item(segment) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) if e.is_instance_of::<PyKeyError>(py) => Ok(None),
+            Err(e) => Err(e),
+        };
+    }
+    if segment.starts_with('_') {
+        return Ok(None);
+    }
+    match obj.getattr(segment) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.is_instance_of::<PyAttributeError>(py) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Insert `leaf` into a nested map skeleton at `path`, as the evaluator expects.
@@ -124,7 +159,7 @@ impl HandoffGraph {
     }
 
     /// Build a routing state holding only the paths the conditions of `node` read.
-    fn partial_state(&self, node: &str, state: &Bound<'_, PyDict>) -> PyResult<Value> {
+    fn partial_state(&self, node: &str, state: &Bound<'_, PyAny>) -> PyResult<Value> {
         let mut pairs = Vec::new();
         if let Some(paths) = self.node_paths.get(node) {
             for path in paths {
@@ -211,14 +246,11 @@ impl HandoffGraph {
         // Converting the whole state was the dominant cost of routing: a realistic
         // LangGraph state (a few hundred messages) took ~165µs to encode, all of it
         // to read one field. Pull just the paths the conditions name instead.
+        // The state may be a dict, any other mapping, or an object with fields
+        // (a dataclass or Pydantic model, as LangGraph states often are).
         let state_val = match state {
             None => Value::Map(Vec::new()),
-            Some(obj) => match obj.cast::<PyDict>() {
-                Ok(dict) => self.partial_state(node, dict)?,
-                // Not a mapping: no paths can resolve, but keep converting it so
-                // an unsupported state type still reports the same error.
-                Err(_) => codec::py_to_value(obj)?,
-            },
+            Some(obj) => self.partial_state(node, obj)?,
         };
         let result = py.detach(|| {
             let edges = self.adj.get(node)?;

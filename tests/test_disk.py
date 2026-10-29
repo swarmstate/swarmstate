@@ -125,6 +125,32 @@ def test_restore_is_atomic(tmp_path):
     assert s.get("ns", "a") == {"v": 1}
 
 
+def test_prefix_lookups_seek_the_index(tmp_path):
+    # The LangGraph adapter filters by prefix on every list() and delete_thread().
+    # As substr() that read every row of the table; as a range it is an index seek
+    # whose cost does not grow with the rest of the store.
+    s = DiskStore(str(tmp_path / "prefix.db"))
+    s.set_many([(f"wr\x1fother-{i}\x1f", "k", 1) for i in range(5000)])
+    s.set_many([("ck\x1ft\x1f", f"task-{i}", 1) for i in range(3)])
+
+    steps = 0
+
+    def count_step():
+        nonlocal steps
+        steps += 1
+        return 0  # keep going
+
+    conn = s._connect()
+    conn.set_progress_handler(count_step, 1)
+    try:
+        assert s.namespaces(prefix="ck\x1f") == ["ck\x1ft\x1f"]
+        assert sorted(s.keys("ck\x1ft\x1f", prefix="task-")) == ["task-0", "task-1", "task-2"]
+    finally:
+        conn.set_progress_handler(None, 1)
+        s.close()
+    assert steps < 500, f"{steps} VM steps: the prefix filter is scanning the table"
+
+
 def test_as_langgraph_checkpointer_backend(tmp_path):
     pytest.importorskip("langgraph")
     import operator

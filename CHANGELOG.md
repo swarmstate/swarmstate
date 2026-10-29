@@ -9,6 +9,92 @@ by every later one. Changes that would break that are not shipped in a minor rel
 the wire format is pinned by byte-for-byte tests against an independent msgpack
 implementation at every width boundary.
 
+## [Unreleased]
+
+### Added
+
+- **`handoff_router`** (`swarmstate.integrations.langgraph`) turns a `HandoffGraph` into
+  the routing function `add_conditional_edges` takes: rule-based handoffs inside a
+  LangGraph graph, resolved in Rust, with no LLM call. No match routes to `END` (or a
+  `default=`).
+- **`HandoffGraph` conditions: list literals and `not in`**, e.g.
+  `category in ['billing', 'refund']` and `tier not in ['free']`. `a not in b` is exactly
+  `not (a in b)`.
+- **`HandoffGraph.route` accepts any state shape**: besides dicts, any mapping and any
+  object whose public attributes are its fields — the dataclasses and Pydantic models
+  LangGraph states often are. Private (`_`-prefixed) attributes are never read.
+- **`SwarmStateSaver.copy_thread`, `prune` and `delete_for_runs`** (and their async
+  variants), from LangGraph's checkpointer interface; the reference savers leave them
+  unimplemented. `copy_thread` copies the whole history, so the copy resumes and
+  time-travels like the source; `prune(strategy="keep_latest")` keeps what
+  `DeltaChannel` state is rebuilt from.
+- **`SwarmStateSaver.get_delta_channel_history`** reads the stored records directly and
+  decodes only the requested channels, where LangGraph's default rebuilds a full
+  `CheckpointTuple` for every ancestor: 2.2x faster with `incremental=True`, 1.3x without.
+- **`copy_store`, `dump_store` and `load_store`**: copy every entry (or a namespace
+  prefix) between any two backends, or through a portable msgpack file — LangGraph
+  threads included, which resume on the other side.
+- **Native async on `RedisStore` and `PostgresStore`**: every key/value operation has an
+  `a`-prefixed twin (`aget`, `aset_many`, ...), described by the new
+  `swarmstate.protocols.AsyncStoreLike`. `SwarmStateSaver`'s `aput`, `aput_writes`,
+  `aget_tuple` and `alist` await them instead of running the sync methods in a worker
+  thread. Stores built from a URL/DSN open their async client lazily per event loop;
+  stores given only sync clients take `aclient=` / `apool=`.
+- **`delete_many` and `delete_namespace` on every store**, used by thread deletion,
+  retention and pruning: one statement or round-trip instead of one per key.
+
+### Changed
+
+- **Prefix lookups on the SQL backends no longer scan the whole table.** The LangGraph
+  adapter runs one on every `list()` and `delete_thread()`, so their cost grew with the
+  whole store rather than with the thread. `DiskStore` now filters prefixes as a
+  code-point range, which SQLite answers from the primary key. `PostgresStore` creates
+  new tables with `ns` and `k` in `COLLATE "C"`, which lets Postgres 15+ answer
+  `starts_with` from the primary key and makes `max_key` follow code-point order like
+  the other backends. Existing tables keep working unchanged; to upgrade one, run
+  `ALTER TABLE <table> ALTER COLUMN ns TYPE text COLLATE "C", ALTER COLUMN k TYPE text COLLATE "C"`.
+- **`SwarmStateSaver.get_tuple` resumes from the latest pointer with one read fewer.**
+  Reading the checkpoint the pointer names now doubles as the check that it still
+  exists, which saves a round-trip per resume on `RedisStore`.
+- **`SwarmStateSaver.list` decodes only what it returns.** A `filter` is checked against
+  the metadata before the checkpoint and its pending writes are decoded, and a requested
+  `checkpoint_id` is read directly instead of listing the whole thread.
+
+### Fixed
+
+- **macOS release builds import on macOS 27.** In release builds rustc strips debug info
+  after linking with its bundled `rust-objcopy`, which drops the padding `ld` puts before
+  the Mach-O string table; whenever the extension imports an odd number of symbols the
+  table lands 4 bytes off an 8-byte boundary, and macOS 27's dyld refuses the image
+  (`mis-aligned LINKEDIT string pool`). Which side a build fell on moved with any code
+  change, so a published wheel could fail to import. `.cargo/config.toml` now has `ld`
+  leave the debug info out (`-Wl,-S`) and skips the strip step on Apple targets; the
+  binaries are otherwise the same size and content.
+
+- **`max_checkpoints_per_thread` no longer loses `DeltaChannel` state.** A
+  `DeltaChannel` (LangGraph 1.2+) is absent from most checkpoints and rebuilt by
+  replaying the writes of the checkpoints before; retention kept only the newest N and
+  cut that chain, so state silently came back short (30 entries as 3). Retention now
+  also keeps the checkpoints back to each delta channel's last snapshot.
+- **`SwarmStateSaver` returns a task's pending writes in order past the tenth.** Write
+  indices live inside string keys and were sorted as text, so write 10 came before write
+  2 and a task with more than ten writes was replayed out of order on resume. They are
+  now ordered by `(task_id, idx)` with `idx` numeric, as the reference savers do. No
+  stored data changes.
+- **`HandoffGraph` conditions no longer crash the process when they are very long.** A
+  long `and`/`or` chain built one tree level per operand, and a long run of `not` was
+  never depth-checked; either overflowed the native stack (`SIGSEGV`). `and`/`or` chains
+  are now flat, and `not` raises `ValueError` past the nesting limit.
+- **`RedisStore.restore` is atomic.** It cleared the store on its own before refilling it,
+  so a refill that failed left the store empty. The wipe and refill now run in one
+  `MULTI`/`EXEC`.
+- **`RedisStore.set_many` is one transaction.** It used a non-transactional pipeline, so a
+  connection dropped mid-batch could write a checkpoint without the latest pointer beside
+  it, and readers kept resuming from the previous checkpoint.
+- **`PostgresStore.set_many` is all-or-nothing.** On the autocommit connections each row
+  committed on its own, so a failure partway kept the earlier rows, and every batch paid
+  one commit per row. The batch is now a single transaction.
+
 ## [0.11.0] - 2026-08-23
 
 ### Fixed

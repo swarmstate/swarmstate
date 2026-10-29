@@ -432,6 +432,54 @@ impl Store {
         })
     }
 
+    /// Delete many `(namespace, key)` pairs in one call; returns how many existed.
+    ///
+    /// Locks each shard once for the batch, like [`Store::set_many`]. Namespaces
+    /// left empty are dropped, as [`Store::delete`] does.
+    fn delete_many(&self, py: Python<'_>, pairs: Vec<(String, String)>) -> usize {
+        py.detach(|| {
+            let mut buckets: Vec<Vec<(String, String)>> = (0..SHARDS).map(|_| Vec::new()).collect();
+            for (ns, key) in pairs {
+                buckets[shard_index(&ns)].push((ns, key));
+            }
+            let mut removed = 0;
+            for (idx, bucket) in buckets.into_iter().enumerate() {
+                if bucket.is_empty() {
+                    continue;
+                }
+                let mut guard = write_lock(&self.shards[idx]);
+                let mut freed = 0;
+                for (ns, key) in bucket {
+                    let Some(nsmap) = guard.get_mut(&ns) else {
+                        continue;
+                    };
+                    if let Some(old) = nsmap.remove(&key) {
+                        freed += old.len();
+                        removed += 1;
+                    }
+                    if nsmap.is_empty() {
+                        guard.remove(&ns);
+                    }
+                }
+                self.shard_bytes[idx].fetch_sub(freed, Ordering::Relaxed);
+            }
+            removed
+        })
+    }
+
+    /// Delete every key in `namespace`; returns how many were removed.
+    fn delete_namespace(&self, py: Python<'_>, namespace: &str) -> usize {
+        py.detach(|| {
+            let idx = shard_index(namespace);
+            let Some(nsmap) = write_lock(&self.shards[idx]).remove(namespace) else {
+                return 0;
+            };
+            let freed: usize = nsmap.values().map(|v| v.len()).sum();
+            self.shard_bytes[idx].fetch_sub(freed, Ordering::Relaxed);
+            nsmap.len()
+        })
+    }
+
     /// Keys within `namespace`, optionally only those starting with `prefix`.
     ///
     /// Empty list if the namespace is unknown.
@@ -753,6 +801,33 @@ mod tests {
             assert!(store.namespaces(py, None).is_empty());
             assert_eq!(store.__len__(py), 0);
             assert!(!store.delete(py, "ns", "b"));
+        });
+    }
+
+    #[test]
+    fn batch_deletes_keep_the_byte_count() {
+        Python::attach(|py| {
+            let store = Store::new("memory", "msgpack", None).unwrap();
+            let v = "payload".into_pyobject(py).unwrap().into_any();
+            for ns in ["a", "b"] {
+                for k in ["x", "y", "z"] {
+                    store.set(py, ns.into(), k.into(), &v).unwrap();
+                }
+            }
+            let pair = |ns: &str, k: &str| (ns.to_string(), k.to_string());
+            let removed =
+                store.delete_many(py, vec![pair("a", "x"), pair("a", "y"), pair("a", "nope")]);
+            assert_eq!(removed, 2);
+            assert_eq!(store.delete_namespace(py, "b"), 3);
+            assert_eq!(store.delete_namespace(py, "b"), 0);
+            assert_eq!(store.namespaces(py, None), vec!["a".to_string()]);
+
+            // Only ("a", "z") is left, so the running byte total must equal one value.
+            let one = codec::encode(&v).unwrap().len();
+            assert_eq!(store.snapshot(py).size_bytes(), one);
+            store.delete_many(py, vec![pair("a", "z")]);
+            assert!(store.namespaces(py, None).is_empty());
+            assert_eq!(store.snapshot(py).size_bytes(), 0);
         });
     }
 

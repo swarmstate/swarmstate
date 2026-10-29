@@ -60,9 +60,16 @@ store.get_many([("workflow", "a"), ("workflow", "b")])   # -> [..., ...], order 
 
 # Deterministic, LLM-free routing (resolved natively in Rust)
 g = ss.HandoffGraph()
-g.add_edge("triage", "billing", when="category == 'billing'")
+g.add_edge("triage", "billing", when="category in ['billing', 'refund']")
+g.add_edge("triage", "support", when="category not in ['spam'] and user.tier == 'gold'")
 g.add_edge("triage", "human")                    # unconditional default
-g.route("triage", {"category": "billing"})       # -> "billing"
+g.route("triage", {"category": "refund"})        # -> "billing"
+# state can be a dict, any mapping, or a dataclass / Pydantic model
+
+# Move state anywhere: between backends, or through a portable file
+ss.copy_store(store, postgres_store)             # e.g. prototype -> production
+ss.dump_store(store, "state.swst")               # survive a restart...
+store = ss.load_store("state.swst")              # ...and come back
 ```
 
 Drop-in LangGraph checkpointer (`pip install "swarmstate[langgraph]"`):
@@ -83,6 +90,28 @@ saver = SwarmStateSaver(max_checkpoints_per_thread=8)     # keep the newest N pe
 Older checkpoints are dropped with their pending writes and channel blobs. On a
 300-invocation thread that is **0.5 MB instead of 28 MB**, and the thread still
 resumes; time travel is limited to the retained window, so size it to taste.
+Graphs with `DeltaChannel` state also keep the checkpoints back to each channel's
+last snapshot, since the newest value is rebuilt from them.
+
+Thread management from LangGraph's checkpointer interface, which the reference
+savers leave unimplemented:
+
+```python
+saver.copy_thread("thread-a", "thread-b")        # full history, resumable
+saver.prune(["thread-a"])                        # keep the latest (DeltaChannel-aware)
+saver.delete_for_runs(["run-123"])               # drop what one run wrote
+```
+
+Rule-based handoffs inside a LangGraph graph, with no LLM call and no routing code:
+
+```python
+from swarmstate.integrations.langgraph import handoff_router
+
+builder.add_conditional_edges("triage", handoff_router(g, "triage"), ["billing", "support", END])
+```
+
+With `RedisStore` or `PostgresStore`, the async methods (`ainvoke`, `astream`, ...)
+await the backend natively instead of running each call in a worker thread.
 
 Optional metrics on checkpoint operations (opt-in, zero overhead when unused):
 
@@ -138,7 +167,15 @@ Early development.
   networked backends. On free-threaded at 8 threads, `set_many` is ~3x the throughput of
   individual sets. `SwarmStateSaver` uses it internally: `put_writes` (and the `incremental`
   channel blobs) flush all writes of a step in a single `set_many`, so fan-out steps that emit
-  many pending writes pay one lock/round-trip instead of one per write.
+  many pending writes pay one lock/round-trip instead of one per write. `delete_many` /
+  `delete_namespace` do the same for deletes (thread deletion, retention, pruning).
+- **Thread management** ✅ - `copy_thread`, `prune` and `delete_for_runs` from LangGraph's
+  checkpointer interface, plus a direct `get_delta_channel_history` (2.2x faster than
+  LangGraph's default walk with `incremental=True`).
+- **Portability** ✅ - `copy_store` between any two backends, `dump_store` / `load_store`
+  to a portable msgpack file.
+- **Native async** ✅ - `RedisStore` and `PostgresStore` expose an async API that
+  `SwarmStateSaver`'s async methods await directly.
 
 ## Examples
 

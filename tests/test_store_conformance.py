@@ -149,6 +149,48 @@ def test_prefix_filtering_on_namespaces_and_keys(store):
     assert store.keys("ns", prefix="zzz") == []
 
 
+#: Names sitting right at the ends of the code-point ranges the SQL backends turn
+#: prefix filters into: U+10FFFF (no next code point) and U+D7FF (whose next one,
+#: U+D800, is a surrogate that cannot be stored).
+EDGE_NAMES = [
+    "aa\U0010ffff",
+    "ab",
+    "abz",
+    "ab\U0010ffff",
+    "ab\U0010ffffz",
+    "ac",
+    "a\U0010ffff",
+    "a\U0010ffffq",
+    "b",
+    "퟿x",
+    "",
+]
+EDGE_CASES = {
+    "ab": {"ab", "abz", "ab\U0010ffff", "ab\U0010ffffz"},
+    "a\U0010ffff": {"a\U0010ffff", "a\U0010ffffq"},
+    "퟿": {"퟿x"},
+    "": set(EDGE_NAMES),
+}
+
+
+def test_prefix_filtering_at_code_point_edges(store):
+    store.set_many([(name, "k", 1) for name in EDGE_NAMES])
+    store.set_many([("edge-keys", name, 1) for name in EDGE_NAMES])
+    for prefix, expected in EDGE_CASES.items():
+        assert set(store.namespaces(prefix=prefix)) - {"edge-keys"} == expected, prefix
+        assert set(store.keys("edge-keys", prefix=prefix)) == expected, prefix
+
+
+def test_prefix_upper_bound():
+    from swarmstate.backends._prefix import prefix_upper_bound
+
+    assert prefix_upper_bound("ab") == "ac"
+    assert prefix_upper_bound("a\U0010ffff") == "b"
+    assert prefix_upper_bound("퟿") == ""
+    assert prefix_upper_bound("") is None
+    assert prefix_upper_bound("\U0010ffff\U0010ffff") is None
+
+
 def test_prefix_filtering_treats_wildcards_literally(store):
     """Thread ids are user data: SQL LIKE and Redis glob syntax must not leak in."""
     store.set_many(
@@ -177,6 +219,8 @@ STORE_INTERFACE = (
     "get_many",
     "contains",
     "delete",
+    "delete_many",
+    "delete_namespace",
     "keys",
     "max_key",
     "namespaces",
@@ -198,6 +242,24 @@ def test_satisfies_the_documented_store_interface(store):
 
     for name in STORE_INTERFACE:
         assert callable(getattr(store, name)), f"{type(store).__name__} is missing {name}"
+
+
+def test_batch_deletes(store):
+    store.set_many([(ns, k, 1) for ns in ("a", "b") for k in ("x", "y", "z")])
+
+    assert store.delete_many([("a", "x"), ("a", "y"), ("a", "missing"), ("nope", "x")]) == 2
+    assert store.delete_many([]) == 0
+    assert store.keys("a") == ["z"]
+
+    assert store.delete_namespace("b") == 3
+    assert store.delete_namespace("b") == 0
+    assert "b" not in store
+    assert sorted(store.namespaces()) == ["a"]
+
+    # Emptying a namespace through delete_many drops it, as delete() does.
+    store.delete_many([("a", "z")])
+    assert store.namespaces() == []
+    assert len(store) == 0
 
 
 def test_max_key(store):
